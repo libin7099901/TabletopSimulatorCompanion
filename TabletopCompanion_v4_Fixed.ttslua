@@ -1,0 +1,799 @@
+--[[
+    🎲 桌游伴侣 (Tabletop Companion) 
+    版本: 4.0.1 - 稳定修复版
+    
+    ✨ 功能特性:
+    - 游戏上下文自动获取
+    - 智能提示词生成
+    - 规则文档管理
+    - 游戏状态分析
+    - 真正的辅助工具功能
+    
+    🔧 此版本修复了API兼容性问题
+--]]
+
+local VERSION = "4.0.1"
+
+-- =====================================
+-- 🏗️ 状态管理
+-- =====================================
+
+local state = {
+    ready = false,
+    ui_minimized = false,
+    llm_provider = "none",
+    
+    -- Ollama配置
+    ollama_url = "http://localhost:11434",
+    ollama_model = "gemma3:12b",
+    
+    -- 游戏状态
+    game_context = {},
+    current_game_name = "",
+    rules_document = "",
+    
+    -- 统计
+    query_count = 0,
+    success_count = 0,
+    
+    -- 上下文收集设置
+    auto_context = true,
+    include_objects = true,
+    include_players = true
+}
+
+-- =====================================
+-- 🛡️ 安全工具函数
+-- =====================================
+
+local function safe_print(msg)
+    print("[桌游伴侣] " .. tostring(msg))
+end
+
+local function safe_broadcast(msg, color)
+    color = color or {0.2, 0.8, 0.2}
+    broadcastToAll("[桌游伴侣] " .. tostring(msg), color)
+end
+
+-- 安全的字符串开头检查
+local function starts_with(text, prefix)
+    if not text or not prefix then return false end
+    return string.sub(text, 1, #prefix) == prefix
+end
+
+-- 安全的字符串包含检查
+local function contains(text, substring)
+    if not text or not substring then return false end
+    return string.find(text, substring, 1, true) ~= nil
+end
+
+-- 安全的JSON解码
+local function safe_json_decode(text)
+    if not text or text == "" then return nil end
+    local success, result = pcall(JSON.decode, text)
+    if success then
+        return result
+    else
+        safe_print("JSON解析失败: " .. tostring(result))
+        return nil
+    end
+end
+
+-- 安全的player操作
+local function safe_player_action(player, action_func)
+    if not player or not action_func then return end
+    local success, err = pcall(action_func, player)
+    if not success then
+        safe_print("Player操作失败: " .. tostring(err))
+    end
+end
+
+-- =====================================
+-- 🎮 游戏上下文收集系统（简化版）
+-- =====================================
+
+-- 获取游戏基本信息
+local function gather_game_info()
+    local game_info = {
+        timestamp = os.time(),
+        game_name = state.current_game_name or "未知游戏",
+        player_count = 0,
+        seated_players = {}
+    }
+    
+    -- 安全获取就座玩家
+    local success, seated = pcall(getSeatedPlayers)
+    if success and seated then
+        game_info.seated_players = seated
+        game_info.player_count = #seated
+    end
+    
+    return game_info
+end
+
+-- 获取对象信息（简化版）
+local function gather_objects_info()
+    if not state.include_objects then return {} end
+    
+    local objects_info = {
+        total_objects = 0,
+        object_types = {}
+    }
+    
+    local success, all_objects = pcall(getObjects)
+    if success and all_objects then
+        objects_info.total_objects = #all_objects
+        
+        -- 简单的类型统计
+        for _, obj in ipairs(all_objects) do
+            local type_success, obj_type = pcall(function() return obj.type or "Unknown" end)
+            if type_success then
+                objects_info.object_types[obj_type] = (objects_info.object_types[obj_type] or 0) + 1
+            end
+        end
+    end
+    
+    return objects_info
+end
+
+-- 获取玩家信息（简化版）
+local function gather_players_info()
+    if not state.include_players then return {} end
+    
+    local players_info = {}
+    
+    local success, seated_players = pcall(getSeatedPlayers)
+    if success and seated_players then
+        for _, color in ipairs(seated_players) do
+            local player = Player[color]
+            if player then
+                local player_data = {
+                    color = color,
+                    hand_count = 0
+                }
+                
+                -- 安全获取手牌区域数量
+                local hand_success, hand_count = pcall(function() 
+                    return player.getHandCount() 
+                end)
+                if hand_success then
+                    player_data.hand_count = hand_count
+                end
+                
+                players_info[color] = player_data
+            end
+        end
+    end
+    
+    return players_info
+end
+
+-- 主要上下文收集函数
+local function gather_game_context()
+    if not state.auto_context then return end
+    
+    safe_print("收集游戏上下文...")
+    
+    state.game_context = {
+        game_info = gather_game_info(),
+        objects = gather_objects_info(),
+        players = gather_players_info(),
+        last_updated = os.time()
+    }
+    
+    safe_print("上下文收集完成，对象数量: " .. (state.game_context.objects.total_objects or 0))
+end
+
+-- =====================================
+-- 🧠 智能提示词生成系统
+-- =====================================
+
+-- 生成游戏状态摘要
+local function generate_game_summary()
+    local context = state.game_context
+    if not context.game_info then return "无游戏状态信息" end
+    
+    local object_summary = ""
+    if context.objects.object_types then
+        for obj_type, count in pairs(context.objects.object_types) do
+            object_summary = object_summary .. obj_type .. ": " .. count .. "个; "
+        end
+    end
+    
+    local summary = string.format([[
+当前游戏: %s
+玩家数量: %d
+就座玩家: %s
+桌面对象总数: %d
+对象类型分布: %s
+]], 
+        context.game_info.game_name,
+        context.game_info.player_count,
+        table.concat(context.game_info.seated_players, ", "),
+        context.objects.total_objects or 0,
+        object_summary
+    )
+    
+    return summary
+end
+
+-- 生成基础系统提示词
+local function generate_system_prompt()
+    return [[你是一个专业的桌游助手，具有以下能力：
+
+1. 规则解释：基于提供的游戏规则文档，准确解释游戏规则
+2. 策略建议：根据当前游戏状态，提供合理的策略建议
+3. 流程指导：帮助玩家了解游戏流程和回合顺序
+4. 问题解答：回答关于游戏机制、计分、胜负条件等问题
+
+请始终：
+- 基于提供的游戏状态和规则文档回答
+- 如果规则不明确，请说明需要查阅具体规则
+- 提供简洁、准确的回答
+- 如果涉及策略建议，请提供多个选择方案]]
+end
+
+-- 生成完整的LLM查询上下文
+local function generate_llm_context(user_question)
+    local context_parts = {}
+    
+    -- 系统提示词
+    table.insert(context_parts, "=== 系统角色 ===")
+    table.insert(context_parts, generate_system_prompt())
+    
+    -- 游戏规则文档
+    if state.rules_document and state.rules_document ~= "" then
+        table.insert(context_parts, "\n=== 游戏规则文档 ===")
+        table.insert(context_parts, state.rules_document)
+    end
+    
+    -- 游戏状态
+    if state.game_context.game_info then
+        table.insert(context_parts, "\n=== 当前游戏状态 ===")
+        table.insert(context_parts, generate_game_summary())
+    end
+    
+    -- 玩家问题
+    table.insert(context_parts, "\n=== 玩家问题 ===")
+    table.insert(context_parts, user_question)
+    
+    return table.concat(context_parts, "\n")
+end
+
+-- =====================================
+-- 📚 规则文档管理系统
+-- =====================================
+
+-- 加载规则文档
+local function load_rules_document(document_text)
+    if not document_text or document_text == "" then
+        safe_broadcast("❌ 规则文档为空", {1, 0, 0})
+        return false
+    end
+    
+    state.rules_document = document_text
+    safe_broadcast("✅ 规则文档已加载（" .. #document_text .. " 字符）")
+    return true
+end
+
+-- 清除规则文档
+local function clear_rules_document()
+    state.rules_document = ""
+    safe_broadcast("✅ 规则文档已清除")
+end
+
+-- 简化的游戏名称检测
+local function detect_game_name()
+    local success, all_objects = pcall(getObjects)
+    if not success or not all_objects then 
+        return "未知游戏" 
+    end
+    
+    -- 简化的检测逻辑
+    for _, obj in ipairs(all_objects) do
+        local name_success, name = pcall(function() return obj.getName() end)
+        if name_success and name then
+            if contains(name:lower(), "rule") or contains(name, "规则") then
+                local game_name = name:gsub("规则", ""):gsub("Rules", "")
+                game_name = game_name:gsub("^%s*(.-)%s*$", "%1")
+                if game_name ~= "" then
+                    return game_name
+                end
+            end
+        end
+    end
+    
+    return "未知游戏"
+end
+
+-- =====================================
+-- 🎯 命令处理系统
+-- =====================================
+
+-- 解析tc命令
+local function parse_tc_command(message)
+    local parts = {}
+    for word in string.gmatch(message, "%S+") do
+        table.insert(parts, word)
+    end
+    return parts
+end
+
+-- 处理配置命令
+local function handle_config_command(parts, player)
+    if #parts < 4 then
+        safe_player_action(player, function(p)
+            p.print("用法: tc config ollama <URL> <模型>")
+        end)
+        return
+    end
+    
+    local provider = parts[3]
+    if provider == "ollama" then
+        state.ollama_url = parts[4] or "http://localhost:11434"
+        state.ollama_model = parts[5] or "gemma3:12b"
+        state.llm_provider = "ollama"
+        safe_broadcast("✅ Ollama配置成功: " .. state.ollama_url .. " | " .. state.ollama_model)
+    else
+        safe_broadcast("❌ 不支持的提供商: " .. provider)
+    end
+end
+
+-- 处理上下文相关命令
+local function handle_context_command(parts, player)
+    if #parts < 3 then
+        safe_player_action(player, function(p)
+            p.print([[
+上下文命令用法:
+tc context refresh - 刷新游戏上下文
+tc context auto on/off - 启用/禁用自动上下文收集
+tc context show - 显示当前游戏状态
+tc context objects on/off - 包含/排除对象信息
+tc context players on/off - 包含/排除玩家信息
+            ]])
+        end)
+        return
+    end
+    
+    local subcommand = parts[3]
+    
+    if subcommand == "refresh" then
+        gather_game_context()
+        safe_broadcast("✅ 游戏上下文已刷新")
+    elseif subcommand == "auto" and parts[4] then
+        state.auto_context = (parts[4] == "on")
+        safe_broadcast("✅ 自动上下文收集: " .. (state.auto_context and "已启用" or "已禁用"))
+    elseif subcommand == "show" then
+        local summary = generate_game_summary()
+        safe_player_action(player, function(p)
+            p.print("=== 当前游戏状态 ===\n" .. summary)
+        end)
+    elseif subcommand == "objects" and parts[4] then
+        state.include_objects = (parts[4] == "on")
+        safe_broadcast("✅ 对象信息收集: " .. (state.include_objects and "已启用" or "已禁用"))
+    elseif subcommand == "players" and parts[4] then
+        state.include_players = (parts[4] == "on")
+        safe_broadcast("✅ 玩家信息收集: " .. (state.include_players and "已启用" or "已禁用"))
+    else
+        safe_player_action(player, function(p)
+            p.print("❌ 未知子命令: " .. subcommand)
+        end)
+    end
+end
+
+-- 处理规则相关命令
+local function handle_rules_command(parts, player)
+    if #parts < 3 then
+        safe_player_action(player, function(p)
+            p.print([[
+规则命令用法:
+tc rules load <文本> - 加载规则文档
+tc rules clear - 清除规则文档
+tc rules status - 显示规则文档状态
+            ]])
+        end)
+        return
+    end
+    
+    local subcommand = parts[3]
+    
+    if subcommand == "load" then
+        local document_text = ""
+        for i = 4, #parts do
+            document_text = document_text .. parts[i] .. " "
+        end
+        load_rules_document(document_text:gsub("^%s*(.-)%s*$", "%1"))
+    elseif subcommand == "clear" then
+        clear_rules_document()
+    elseif subcommand == "status" then
+        local status = string.format("规则文档状态: %s (%d 字符)", 
+            (state.rules_document ~= "" and "已加载" or "未加载"),
+            #state.rules_document)
+        safe_player_action(player, function(p)
+            p.print(status)
+        end)
+    else
+        safe_player_action(player, function(p)
+            p.print("❌ 未知子命令: " .. subcommand)
+        end)
+    end
+end
+
+-- 显示帮助
+local function show_help(player)
+    local help_text = [[
+🎲 桌游伴侣使用指南 v4.0
+
+基础命令:
+tc help         - 显示帮助
+tc status       - 显示状态
+tc test         - 测试连接
+
+配置命令:
+tc config ollama <URL> <模型> - 配置Ollama
+
+上下文命令:
+tc context refresh     - 刷新游戏上下文
+tc context auto on/off - 自动上下文收集
+tc context show        - 显示游戏状态
+
+规则命令:
+tc rules load <文本>   - 加载规则文档
+tc rules clear         - 清除规则文档
+tc rules status        - 规则文档状态
+
+查询:
+@tc <问题>      - 向AI提问（包含游戏上下文）
+
+示例:
+tc config ollama http://localhost:11434 gemma3:12b
+tc rules load 这是一个策略游戏，玩家轮流...
+@tc 我现在应该采取什么策略？
+    ]]
+    
+    safe_player_action(player, function(p)
+        p.print(help_text)
+    end)
+end
+
+-- 显示状态
+local function show_status(player)
+    local status_text = string.format([[
+🎲 桌游伴侣状态 v%s
+
+LLM配置:
+- 提供商: %s
+- Ollama URL: %s
+- Ollama模型: %s
+
+游戏状态:
+- 游戏名称: %s
+- 规则文档: %s
+- 自动上下文: %s
+- 对象信息: %s
+- 玩家信息: %s
+
+统计:
+- 查询次数: %d
+- 成功次数: %d
+    ]], 
+    VERSION, 
+    state.llm_provider, 
+    state.ollama_url, 
+    state.ollama_model,
+    state.current_game_name,
+    (state.rules_document ~= "" and "已加载" or "未加载"),
+    (state.auto_context and "启用" or "禁用"),
+    (state.include_objects and "包含" or "排除"),
+    (state.include_players and "包含" or "排除"),
+    state.query_count, 
+    state.success_count)
+    
+    safe_player_action(player, function(p)
+        p.print(status_text)
+    end)
+end
+
+-- =====================================
+-- 🔗 Ollama连接
+-- =====================================
+
+local function test_ollama()
+    safe_broadcast("🔍 测试Ollama连接...")
+    
+    if not WebRequest then
+        safe_broadcast("❌ WebRequest不可用", {1, 0, 0})
+        return
+    end
+    
+    local request_data = {
+        model = state.ollama_model,
+        prompt = "请简单回复'测试成功'",
+        stream = false
+    }
+    
+    local json_data = JSON.encode(request_data)
+    safe_print("发送测试请求到: " .. state.ollama_url .. "/api/generate")
+    
+    local headers = {
+        ["Content-Type"] = "application/json"
+    }
+    
+    WebRequest.custom(state.ollama_url .. "/api/generate", "POST", true, json_data, headers, function(request)
+        if request.is_error then
+            safe_print("Ollama连接错误: " .. tostring(request.error))
+            safe_broadcast("❌ Ollama连接失败: " .. tostring(request.error), {1, 0, 0})
+        else
+            safe_print("响应状态: 成功")
+            safe_print("响应长度: " .. #request.text)
+            
+            local data = safe_json_decode(request.text)
+            if data and data.response then
+                safe_broadcast("✅ Ollama测试成功！", {0, 1, 0})
+                safe_print("AI回复: " .. data.response)
+            else
+                safe_broadcast("❌ 响应解析失败", {1, 0.5, 0})
+                safe_print("原始响应: " .. request.text)
+            end
+        end
+    end)
+end
+
+-- 查询Ollama（包含智能上下文）
+local function query_ollama(question, player)
+    if not question or question == "" then return end
+    
+    state.query_count = state.query_count + 1
+    safe_broadcast("🤔 正在分析游戏状态并查询: " .. question)
+    
+    if not WebRequest then
+        safe_broadcast("❌ WebRequest不可用", {1, 0, 0})
+        return
+    end
+    
+    -- 刷新游戏上下文（如果启用）
+    if state.auto_context then
+        pcall(gather_game_context)
+    end
+    
+    -- 生成完整的上下文提示词
+    local full_context = generate_llm_context(question)
+    safe_print("生成的上下文长度: " .. #full_context .. " 字符")
+    
+    local request_data = {
+        model = state.ollama_model,
+        prompt = full_context,
+        stream = false
+    }
+    
+    local headers = {
+        ["Content-Type"] = "application/json"
+    }
+    
+    WebRequest.custom(state.ollama_url .. "/api/generate", "POST", true, JSON.encode(request_data), headers, function(request)
+        if request.is_error then
+            safe_broadcast("❌ 查询失败: " .. tostring(request.error), {1, 0, 0})
+        else
+            local data = safe_json_decode(request.text)
+            if data and data.response then
+                state.success_count = state.success_count + 1
+                safe_broadcast("🤖 " .. data.response)
+            else
+                safe_broadcast("❌ 无法解析AI回复", {1, 0.5, 0})
+                safe_print("原始响应: " .. request.text)
+            end
+        end
+    end)
+end
+
+-- =====================================
+-- 🎨 用户界面（简化版）
+-- =====================================
+
+local function create_ui()
+    local ui_xml = [[
+<Panel rectAlignment="UpperLeft" offsetXY="80 -10" width="260" height="100" id="MainPanel">
+    <Panel color="#1a1a1aCC" width="100%" height="100%">
+        <Text fontSize="14" color="#00ff00" alignment="MiddleCenter" offsetXY="0 35">
+            🎲 桌游伴侣 v]] .. VERSION .. [[
+        </Text>
+        
+        <Text fontSize="9" color="#ffffff" alignment="MiddleCenter" offsetXY="0 22">
+            智能游戏助手 - 输入'tc help'查看命令
+        </Text>
+        
+        <Text fontSize="8" color="#cccccc" alignment="MiddleCenter" offsetXY="0 10">
+            游戏: ]] .. (state.current_game_name or "未知") .. [[ | 规则: ]] .. (state.rules_document ~= "" and "已加载" or "未加载") .. [[
+        </Text>
+        
+        <Panel offsetXY="0 -10" width="240" height="25">
+            <Button onClick="ui_show_help" width="60" height="20" offsetXY="-80 0">
+                <Text fontSize="9" color="#ffffff" alignment="MiddleCenter">帮助</Text>
+            </Button>
+            <Button onClick="ui_refresh_context" width="60" height="20" offsetXY="-15 0">
+                <Text fontSize="9" color="#ffffff" alignment="MiddleCenter">刷新</Text>
+            </Button>
+            <Button onClick="ui_test_connection" width="60" height="20" offsetXY="50 0">
+                <Text fontSize="9" color="#ffffff" alignment="MiddleCenter">测试</Text>
+            </Button>
+        </Panel>
+    </Panel>
+</Panel>
+    ]]
+    
+    UI.setXml(ui_xml)
+end
+
+-- UI事件处理
+function ui_show_help()
+    show_help(nil)
+end
+
+function ui_refresh_context()
+    gather_game_context()
+    safe_broadcast("✅ 游戏上下文已刷新")
+    create_ui()
+end
+
+function ui_test_connection()
+    test_ollama()
+end
+
+-- =====================================
+-- 💬 聊天消息处理
+-- =====================================
+
+function onChat(message, player)
+    if not state.ready then return true end
+    if not message or message == "" then return true end
+    
+    -- 安全的命令处理
+    local command_success, result = pcall(function()
+        if starts_with(message, "tc ") then
+            local parts = parse_tc_command(message)
+            
+            if #parts >= 2 then
+                local command = parts[2]
+                
+                if command == "help" then
+                    show_help(player)
+                elseif command == "status" then
+                    show_status(player)
+                elseif command == "test" then
+                    test_ollama()
+                elseif command == "config" then
+                    handle_config_command(parts, player)
+                elseif command == "context" then
+                    handle_context_command(parts, player)
+                elseif command == "rules" then
+                    handle_rules_command(parts, player)
+                else
+                    safe_player_action(player, function(p)
+                        p.print("❌ 未知命令: " .. command .. "。输入 'tc help' 查看帮助。")
+                    end)
+                end
+            end
+            return false
+            
+        elseif starts_with(message, "@tc ") then
+            if state.llm_provider == "none" then
+                safe_broadcast("❌ 请先配置LLM提供商。输入 'tc help' 查看帮助。", {1, 0, 0})
+            else
+                local question = string.sub(message, 5) -- 移除"@tc "
+                query_ollama(question, player)
+            end
+            return false
+        end
+        
+        return true
+    end)
+    
+    if not command_success then
+        safe_print("聊天命令处理出错: " .. tostring(result))
+        return true
+    end
+    
+    return result
+end
+
+-- =====================================
+-- 🚀 初始化系统
+-- =====================================
+
+function onLoad(saved_state)
+    safe_print("桌游伴侣初始化开始...")
+    
+    -- 恢复保存的状态
+    if saved_state and saved_state ~= "" then
+        local success, data = pcall(JSON.decode, saved_state)
+        if success and data then
+            state.llm_provider = data.llm_provider or "none"
+            state.ollama_url = data.ollama_url or "http://localhost:11434"
+            state.ollama_model = data.ollama_model or "gemma3:12b"
+            state.query_count = data.query_count or 0
+            state.success_count = data.success_count or 0
+            state.current_game_name = data.current_game_name or ""
+            state.rules_document = data.rules_document or ""
+            state.auto_context = data.auto_context or true
+            state.include_objects = data.include_objects or true
+            state.include_players = data.include_players or true
+            safe_print("配置已恢复")
+        end
+    end
+    
+    -- 安全地检测游戏名称
+    local game_name_success, game_name = pcall(detect_game_name)
+    if game_name_success then
+        state.current_game_name = game_name
+        safe_print("检测到游戏: " .. state.current_game_name)
+    else
+        state.current_game_name = "未知游戏"
+        safe_print("游戏名称检测失败，使用默认名称")
+    end
+    
+    -- 安全地初始收集游戏上下文
+    if state.auto_context then
+        local context_success = pcall(gather_game_context)
+        if context_success then
+            safe_print("初始上下文收集成功")
+        else
+            safe_print("初始上下文收集失败，将在稍后重试")
+        end
+    end
+    
+    -- 安全地创建UI
+    local ui_success = pcall(create_ui)
+    if ui_success then
+        safe_print("UI创建成功")
+    else
+        safe_print("UI创建失败，但不影响核心功能")
+    end
+    
+    -- 标记就绪
+    state.ready = true
+    
+    safe_print("桌游伴侣初始化完成 v" .. VERSION)
+    safe_broadcast("✅ 桌游伴侣已启动 v" .. VERSION .. " - 智能游戏助手")
+    safe_broadcast("输入 'tc help' 查看所有功能")
+end
+
+function onSave()
+    local save_data = {
+        llm_provider = state.llm_provider,
+        ollama_url = state.ollama_url,
+        ollama_model = state.ollama_model,
+        query_count = state.query_count,
+        success_count = state.success_count,
+        current_game_name = state.current_game_name,
+        rules_document = state.rules_document,
+        auto_context = state.auto_context,
+        include_objects = state.include_objects,
+        include_players = state.include_players
+    }
+    return JSON.encode(save_data)
+end
+
+-- =====================================
+-- 🎯 简化的事件监听
+-- =====================================
+
+-- 简化的对象移动监听
+function onObjectDrop(player_color, dropped_object)
+    if state.auto_context and state.ready then
+        -- 延迟刷新上下文，避免频繁更新
+        Wait.time(function()
+            pcall(gather_game_context)
+            pcall(create_ui)
+        end, 1.0)
+    end
+end
+
+-- 简化的玩家变化监听
+function onPlayerChangeColor(player_color)
+    if state.auto_context and state.ready then
+        Wait.time(function()
+            pcall(gather_game_context)
+            pcall(create_ui)
+        end, 2.0)
+    end
+end 
