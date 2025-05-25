@@ -1,0 +1,145 @@
+<!-- 
+    桌游伴侣主面板 XML定义
+    版本: 1.0.0
+    作者: LeadDeveloperAI (达里奥)
+    创建时间: 2025-01-27
+-->
+
+<Defaults>
+    <!-- 主面板样式 -->
+    <Panel class="MainPanel" 
+           width="400" height="600"
+           offsetXY="100 100"
+           allowDragging="true"
+           returnToOriginalPositionWhenReleased="false"
+           color="#1A1A1A"
+           showBackground="true"
+           outline="#7F8C8D"
+           outlineSize="2 2"/>
+    
+    <!-- 文本样式 -->
+    <Text class="HeaderText" 
+          fontSize="16" 
+          color="#FFFFFF" 
+          alignment="MiddleCenter"
+          fontStyle="Bold"/>
+    
+    <Text class="NormalText" 
+          fontSize="12" 
+          color="#FFFFFF" 
+          alignment="MiddleLeft"/>
+    
+    <Text class="SmallText" 
+          fontSize="10" 
+          color="#BDC3C7" 
+          alignment="MiddleLeft"/>
+    
+    <!-- 按钮样式 -->
+    <Button class="PrimaryButton" 
+            color="#2C3E50" 
+            textColor="#FFFFFF" 
+            fontSize="12"
+            padding="10 5 10 5"/>
+    
+    <Button class="SecondaryButton" 
+            color="#34495E" 
+            textColor="#FFFFFF" 
+            fontSize="12"
+            padding="8 4 8 4"/>
+    
+    <Button class="SmallButton" 
+            color="#7F8C8D" 
+            textColor="#FFFFFF" 
+            fontSize="10"
+            padding="5 3 5 3"/>
+</Defaults>
+
+<Panel class="MainPanel" id="TabletopCompanionMain">
+    <!-- 标题栏 -->
+    <Text class="HeaderText" id="MainTitle" 
+          offsetXY="0 250">桌游伴侣 v1.0.0</Text>
+    
+    <Text class="SmallText" id="StatusText" 
+          offsetXY="0 220">状态: 就绪</Text>
+    
+    <!-- 分隔线 -->
+    <Panel width="380" height="2" 
+           offsetXY="0 190" 
+           color="#7F8C8D"/>
+    
+    <!-- 主要功能按钮 -->
+    <Text class="NormalText" 
+          offsetXY="0 150">主要功能:</Text>
+    
+    <Button class="PrimaryButton" 
+            id="MenuButton" 
+            offsetXY="-80 120"
+            onClick="UIManager.showMenu">菜单</Button>
+    
+    <Button class="PrimaryButton" 
+            id="StatusButton" 
+            offsetXY="80 120"
+            onClick="UIManager.showStatus">状态</Button>
+    
+    <Button class="SecondaryButton" 
+            id="SettingsButton" 
+            offsetXY="-80 80"
+            onClick="UIManager.showSettings">设置</Button>
+    
+    <Button class="SecondaryButton" 
+            id="HelpButton" 
+            offsetXY="80 80"
+            onClick="UIManager.showHelp">帮助</Button>
+    
+    <!-- 分隔线 -->
+    <Panel width="380" height="2" 
+           offsetXY="0 50" 
+           color="#7F8C8D"/>
+    
+    <!-- 快速操作 -->
+    <Text class="NormalText" 
+          offsetXY="0 20">快速操作:</Text>
+    
+    <Button class="SecondaryButton" 
+            id="QueryButton" 
+            offsetXY="-80 -10"
+            onClick="UIManager.showQuery">规则查询</Button>
+    
+    <Button class="SecondaryButton" 
+            id="TranslateButton" 
+            offsetXY="80 -10"
+            onClick="UIManager.showTranslate">翻译</Button>
+    
+    <!-- 分隔线 -->
+    <Panel width="380" height="2" 
+           offsetXY="0 -40" 
+           color="#7F8C8D"/>
+    
+    <!-- 系统信息 -->
+    <Text class="SmallText" 
+          offsetXY="0 -70">系统信息:</Text>
+    
+    <Text class="SmallText" 
+          id="ModuleCount"
+          offsetXY="0 -90">模块: 加载中...</Text>
+    
+    <Text class="SmallText" 
+          id="UptimeInfo"
+          offsetXY="0 -110">运行时间: 0秒</Text>
+    
+    <!-- 控制按钮 -->
+    <Button class="SmallButton" 
+            id="MinimizeButton" 
+            offsetXY="-150 -250"
+            onClick="UIManager.minimizePanel">最小化</Button>
+    
+    <Button class="SmallButton" 
+            id="CloseButton" 
+            offsetXY="150 -250"
+            onClick="UIManager.hidePanel">关闭</Button>
+    
+    <!-- 版本信息 -->
+    <Text class="SmallText" 
+          offsetXY="0 -280"
+          alignment="MiddleCenter">LeadDeveloperAI (达里奥) 制作</Text>
+</Panel> 

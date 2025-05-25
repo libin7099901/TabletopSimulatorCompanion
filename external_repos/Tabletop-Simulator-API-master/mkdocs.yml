@@ -1,0 +1,130 @@
+site_name: Tabletop Simulator API
+theme:
+  custom_dir: 'theme'
+  favicon: 'img/Icon-Dice.png'
+  logo: 'img/TSIcon.png'
+  name: 'material'
+  palette:
+    primary: 'indigo'
+    accent: 'indigo'
+
+extra_css:
+  - css/theme.css
+  - css/table.css
+  - css/type_icons.css
+  - css/i_icons.css
+  - css/player_color_table.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - codehilite
+  - meta
+  - pymdownx.arithmatex
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.critic
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:materialx.emoji.twemoji
+      emoji_generator: !!python/name:materialx.emoji.to_svg
+      options:
+        custom_icons:
+          - theme/icons
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.keys:
+      camel_case: true
+      strict: true
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+  - toc_ext:
+      mkdocs_search_sections: true
+      permalink: true
+
+repo_name: 'GitHub Source'
+repo_url: 'https://github.com/Berserk-Games/Tabletop-Simulator-API'
+
+
+extra:
+  social:
+    - icon: fontawesome/brands/reddit
+      link: 'https://www.reddit.com/r/tabletopsimulator/'
+    - icon: fontawesome/brands/twitter
+      link: 'https://twitter.com/tabletopsim'
+    - icon: fontawesome/brands/facebook
+      link: 'https://www.facebook.com/tabletopsimulator'
+    - icon: fontawesome/brands/youtube
+      link: 'https://www.youtube.com/user/berserkgames'
+
+nav:
+  - Getting Started:
+    - Introduction: index.md
+    - Overview: overview.md
+    - Atom: atom.md
+    - Lua in Tabletop Simulator: lua-in-tabletop-simulator.md
+    - System Console: systemconsole.md
+    - Virtual Reality: vr.md
+    - External Editor API: externaleditorapi.md
+    - Patch Notes: https://www.tabletopsimulator.com/news/patch-notes
+  - Scripting API:
+    - Introduction: intro.md
+    - Types: types.md
+    - Events: events.md
+    - Base: base.md
+    - Object: object.md
+    - Object Behaviors:
+      - AssetBundle: behavior/assetbundle.md
+      - Book: behavior/book.md
+      - Browser: behavior/browser.md
+      - Clock: behavior/clock.md
+      - Container: behavior/container.md
+      - Counter: behavior/counter.md
+      - LayoutZone: behavior/layoutzone.md
+      - RPGFigurine: behavior/rpgfigurine.md
+      - TextTool: behavior/texttool.md
+    - Object Components:
+      - Introduction: components/introduction.md
+      - GameObject: components/gameobject.md
+      - Component: components/component.md
+      - Material: components/material.md
+      - Examples: components/examples.md
+    - Backgrounds: backgrounds.md
+    - Color: color.md
+    - Grid: grid.md
+    - Hands: hands.md
+    - Info: info.md
+    - JSON: json.md
+    - Lighting: lighting.md
+    - Music Player: musicplayer.md
+    - Notes: notes.md
+    - Physics: physics.md
+    - Player:
+      - Colors: player/colors.md
+      - Instance: player/instance.md
+      - Manager: player/manager.md
+    - Spawnable Objects:
+      - Built-in: built-in-object.md
+      - Custom: custom-game-objects.md
+    - Tables: tables.md
+    - Time: time.md
+    - Timer: timer.md
+    - Turns: turns.md
+    - UI: ui.md
+    - Vector: vector.md
+    - Wait: wait.md
+    - Web Request:
+      - Instance: webrequest/instance.md
+      - Manager: webrequest/manager.md
+  - UI API:
+    - Introduction: ui/introUI.md
+    - Attributes: ui/attributes.md
+    - Basic Elements: ui/basicelements.md
+    - Input Elements: ui/inputelements.md
+    - Layout/Grouping: ui/layoutgrouping.md
+    - Defaults: ui/defaults.md
