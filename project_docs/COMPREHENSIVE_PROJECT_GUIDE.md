@@ -117,13 +117,15 @@
 
 ## **1. 快速上手：启动您的AI项目伙伴**
 
-本节将引导您完成项目的初始设置并激活核心的 `OrchestratorAgent`。**请确保您已遵循根目录 [`README.md`](../README.md) 完成了项目文件的复制和依赖安装。**
+本节将引导您完成项目的初始设置并激活核心的 `OrchestratorAgent`。**请确保您已遵循根目录 [`README.md`](../README.md) 完成了项目文件的复制和依赖安装，特别是启动了本地HTTP中继服务 (`local_rules_server.py`)。**
 
 ### **1.1 环境准备与配置**
 
 确保您的开发环境满足以下基本要求：
 
 *   **Cursor IDE**: 本框架设计与Cursor紧密集成。
+*   **Python 3.7+**: 用于运行本地HTTP中继服务 (`local_rules_server.py`)。确保已安装 Flask, Flask-CORS, requests (`pip install Flask Flask-CORS requests`)。
+*   **本地HTTP中继服务已运行**: `local_rules_server.py` 必须在后台运行，监听端口（默认为5678）。Mod将通过此服务加载规则和与Ollama交互。
 *   **Node.js**: `PromptX` 框架可能依赖Node.js执行其脚本（例如，`bootstrap.md` 中提到的 `promptx.js`）。请确保已安装Node.js。
 *   **项目文件**: 您已获得本项目的完整副本，包括 `PromptX/` 和 `project_docs/` 目录。
 
@@ -380,4 +382,104 @@ AI生成的代码、文档等所有产出物都需要您的审查和确认。请
 ---
 
 我们致力于打造一个顺畅、高效的AI协作体验。祝您项目顺利！
-如果您有任何反馈或建议来改进本指南或整个框架，请随时提出。 
+如果您有任何反馈或建议来改进本指南或整个框架，请随时提出。
+
+## **X. 核心架构组件：本地 HTTP 中继服务与 Mod 交互 (新增章节)**
+
+为了克服 Tabletop Simulator (TTS) Mod 沙箱环境的限制（特别是文件系统访问和直接调用本地 LLM 服务），本项目引入了一个本地运行的 Python HTTP 中继服务 (`local_rules_server.py`)。
+
+### **X.1 引入原因**
+
+*   **文件系统访问**: TTS Mod 本身无法直接读取用户本地文件系统中的任意文件（如图片或文本格式的规则书）。本地服务器可以安全地读取指定路径的文件。
+*   **简化 LLM 调用**: 使得 Mod 不需要直接处理复杂的 HTTP 请求构造和 LLM API 的细节，特别是对于需要发送图片数据的多模态 LLM (如 Ollama 的某些模型)。
+*   **Base64 处理**: 对于图片规则，本地服务器负责将其转换为 Base64 编码，减轻 Mod 端的负担。
+*   **用户体验**: 允许用户通过简单的文件路径输入来加载规则，而不是复杂的复制粘贴 Base64 字符串。
+
+### **X.2 架构概览**
+
+系统包含三个主要组件：
+
+1.  **TTS Mod (`TabletopCompanion.ttslua`)**:
+    *   运行在 Tabletop Simulator 环境内。
+    *   负责收集游戏内上下文，提供用户界面 (UI)。
+    *   通过 TTS 的 `WebRequest` API 与本地 HTTP 中继服务通信，发送加载规则的请求（文件路径或文本）、清除规则的请求以及 LLM 查询请求。
+2.  **本地 HTTP 中继服务 (`local_rules_server.py`)**:
+    *   一个轻量级的 Python Flask Web 应用，在用户本地机器上运行。
+    *   监听特定端口 (默认为 `5678`)。
+    *   提供 API 端点供 TTS Mod 调用。
+    *   负责：
+        *   接收 Mod 发来的文件路径，读取文件内容（图片或文本）。
+        *   如果是图片文件，将其转换为 Base64 编码。
+        *   在服务器内存中存储当前加载的规则（图片 Base64 或文本内容）。
+        *   接收 Mod 发来的 LLM 查询提示和模型信息。
+        *   将查询提示（如果当前加载了图片规则，则附带图片 Base64 数据）代理转发给本地运行的 Ollama 服务。
+        *   将 Ollama 的响应返回给 TTS Mod。
+3.  **Ollama 服务**:
+    *   用户在本地运行的 LLM 服务。
+    *   接收来自本地 HTTP 中继服务的请求，处理并返回结果。
+
+### **X.3 `local_rules_server.py` 详解**
+
+*   **技术栈**: Python 3.7+, Flask, Flask-CORS, requests。
+*   **核心功能**:
+    *   规则加载与管理：支持通过文件路径加载图片/文本规则，或直接加载文本规则。
+    *   图片处理：将图片文件转换为 Base64 编码。
+    *   规则存储：在服务器内存中临时存储当前激活的规则（一种规则类型：图片或文本）。
+    *   Ollama 代理：作为 TTS Mod 和本地 Ollama 服务之间的桥梁，将查询请求（包括可能的图片数据）转发给 Ollama，并返回其响应。
+*   **API 端点 (运行在 `http://localhost:5678`)**:
+    *   `POST /load_rules`:
+        *   请求体 (JSON): `{ "file_path": "...", "text_rules": "..." }` (两者选一)
+        *   如果提供 `file_path`：读取本地文件（图片或文本）。若是图片，转为 Base64。
+        *   如果提供 `text_rules`：直接使用提供的文本。
+        *   存储规则内容和类型，清除旧规则。
+        *   响应: 成功或失败的状态。
+    *   `GET /get_current_rules`:
+        *   请求体: 无
+        *   响应 (JSON): `{ "status": "success", "type": "image|text|none", "message": "...", "base64_data_length": (if image), "text_data": (if text) }`
+    *   `POST /clear_rules`:
+        *   请求体: 无
+        *   响应 (JSON): `{ "status": "success", "message": "规则已清除" }`
+    *   `POST /ollama_proxy`:
+        *   请求体 (JSON): `{ "prompt": "...", "model": "...", "stream": false/true }` (由 Mod 发送)
+        *   服务器检查内存中是否有 `current_rules_base64` (图片)。
+        *   如果存在图片规则，将其添加到发送给 Ollama 的请求体中的 `images` 字段。
+        *   使用 `requests` 库调用配置的 Ollama API (`/api/generate`)。
+        *   响应: 直接返回 Ollama 的 JSON 响应或错误信息。
+*   **启动与运行**:
+    1.  确保安装依赖: `pip install Flask Flask-CORS requests`。
+    2.  在终端中运行: `python local_rules_server.py`。
+    3.  服务器将在 `http://localhost:5678` (或 `0.0.0.0:5678`) 启动并持续运行。
+
+### **X.4 TTS Mod 与本地服务器的交互逻辑**
+
+*   **规则加载 (通过文件路径)**:
+    1.  用户在 Mod UI 中输入规则文件的本地路径。
+    2.  Mod 的 Lua 脚本通过 `WebRequest.post` 向本地服务器的 `/load_rules` 端点发送包含 `{ "file_path": "用户输入的路径" }` 的 JSON 请求。
+    3.  本地服务器处理请求，读取文件，（如果适用）转换图片为 Base64，并存储规则。
+    4.  服务器返回成功/失败消息给 Mod。Mod 更新 UI 显示规则状态。
+*   **规则加载 (通过直接文本)**:
+    1.  用户通过命令 `tc rules load <文本内容>` 或未来可能的 UI 粘贴文本。
+    2.  Mod 的 Lua 脚本通过 `WebRequest.post` 向本地服务器的 `/load_rules` 端点发送包含 `{ "text_rules": "用户输入的文本" }` 的 JSON 请求。
+    3.  服务器处理并存储文本规则。
+    4.  服务器返回成功/失败消息给 Mod。
+*   **LLM 查询**:
+    1.  用户通过 `@tc <问题>` 或右键菜单等方式发起查询。
+    2.  Mod 收集游戏内上下文，并结合用户问题构建基础的文本提示 (prompt)。
+    3.  Mod 获取用户配置的 Ollama 模型名称。
+    4.  Mod 的 Lua 脚本通过 `WebRequest.post` 向本地服务器的 `/ollama_proxy` 端点发送包含 `{ "prompt": "构建的提示", "model": "模型名称" }` 的 JSON 请求。
+    5.  本地服务器接收请求，检查当前是否已加载图片规则 (`current_rules_base64`)。
+    6.  如果存在图片规则，服务器构建包含 `prompt`, `model`, 和 `images: [base64_data]` 的新请求体，并将其发送给实际的 Ollama 服务。如果只有文本规则，则文本规则已经由 Mod 包含在 `prompt` 中，服务器直接转发。
+    7.  Ollama 服务处理请求并返回响应给本地服务器。
+    8.  本地服务器将 Ollama 的响应原样返回给 Mod。
+    9.  Mod 解析响应并在 UI 或聊天框中显示结果。
+*   **规则状态检查和清除**:
+    *   Mod 使用 `WebRequest.get` 调用 `/get_current_rules` 来获取当前服务器上的规则状态，并更新 UI。
+    *   Mod 使用 `WebRequest.post` 调用 `/clear_rules` 来请求服务器清除当前加载的规则。
+
+### **X.5 注意事项**
+
+*   **安全性**: `local_rules_server.py` 默认监听 `0.0.0.0`，这意味着同一网络下的其他设备可能访问到。如果仅本机使用，可以考虑修改为监听 `localhost` 或 `127.0.0.1`。用户需要注意不要将包含敏感信息的文件路径暴露给不信任的 Mod。
+*   **错误处理**: Mod 和本地服务器都需要有健壮的错误处理机制来应对网络问题、文件未找到、Ollama 服务错误等情况。
+*   **依赖管理**: 用户需要自行安装 Python 和相关库。
+
+--- 

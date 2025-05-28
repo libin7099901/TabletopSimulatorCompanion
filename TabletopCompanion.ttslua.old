@@ -1,0 +1,1929 @@
+--[[
+    🎲 桌游伴侣 (Tabletop Companion) 
+    版本: 4.0.0 - 智能游戏助手版
+    
+    ✨ 新功能:
+    - 游戏上下文自动获取
+    - 智能提示词生成
+    - 规则文档管理
+    - 游戏状态分析
+    - 真正的辅助工具功能
+--]]
+
+local VERSION = "4.0.0"
+
+-- =====================================
+-- 🏗️ 状态管理
+-- =====================================
+
+local state = {
+    ready = false,
+    ui_minimized = false,
+    llm_provider = "none",
+    
+    -- Ollama配置
+    ollama_url = "http://localhost:11434",
+    ollama_model = "gemma3:12b",
+    
+    -- OpenAI配置
+    openai_key = nil,
+    openai_model = "gpt-3.5-turbo",
+    
+    -- Gemini配置
+    gemini_key = nil,
+    gemini_model = "gemini-pro", -- 默认的Gemini模型
+    
+    -- UI位置 (调整后的默认值，避开左侧工具栏)
+    ui_panel_offsets = { main = "70 -10", minimized = "70 -10" },
+    
+    -- 游戏状态
+    game_context = {},
+    current_game_name = "未知游戏", -- Ensure default is set here
+    rules_document = "",
+    
+    -- 统计
+    query_count = 0,
+    success_count = 0,
+    
+    -- 上下文收集设置
+    auto_context = true,
+    include_objects = true,
+    include_players = true,
+    include_zones = true,
+    include_notebook = true
+}
+
+-- =====================================
+-- 🛡️ 安全工具函数
+-- =====================================
+
+local function safe_print(msg)
+    print("[桌游伴侣] " .. tostring(msg))
+end
+
+local function safe_broadcast(msg, color_for_broadcast, player_target)
+    local prefix = "[桌游伴侣] "
+    local full_msg = prefix .. tostring(msg)
+    
+    if player_target and player_target.print then
+        local success, err = pcall(player_target.print, full_msg)
+        if success then
+            safe_print("消息已发送给玩家 " .. tostring(player_target.color or "未知") .. ": " .. full_msg)
+        else
+            safe_print("向玩家 " .. tostring(player_target.color or "未知") .. " 发送消息失败: " .. tostring(err) .. " - 消息: " .. full_msg)
+        end
+    elseif broadcastToAll then
+        local bc_color = color_for_broadcast or {0.2, 0.8, 0.2}
+        local success, err = pcall(broadcastToAll, full_msg, bc_color)
+        if not success then
+            safe_print("全局广播失败: " .. tostring(err) .. " - " .. full_msg)
+        end
+    else
+        safe_print("broadcastToAll/player.print 不可用 - " .. full_msg)
+    end
+end
+
+-- 安全的字符串开头检查（完全避免Lua模式）
+local function starts_with(text, prefix)
+    if not text or not prefix then return false end
+    if #text < #prefix then return false end
+    
+    for i = 1, #prefix do
+        if text:sub(i, i) ~= prefix:sub(i, i) then
+            return false
+        end
+    end
+    return true
+end
+
+-- 安全的字符串包含检查
+local function contains(text, substring)
+    if not text or not substring then return false end
+    if #substring > #text then return false end
+    
+    for i = 1, #text - #substring + 1 do
+        local match = true
+        for j = 1, #substring do
+            if text:sub(i + j - 1, i + j - 1) ~= substring:sub(j, j) then
+                match = false
+                break
+            end
+        end
+        if match then
+            return true
+        end
+    end
+    return false
+end
+
+-- 辅助函数：手动修剪字符串两端的空格和制表符
+local function manual_trim(text)
+    if not text or type(text) ~= "string" then return "" end
+    local s = 1
+    local e = #text
+    while s <= e and (text:sub(s,s) == " " or text:sub(s,s) == "\t") do
+        s = s + 1
+    end
+    while e >= s and (text:sub(e,e) == " " or text:sub(e,e) == "\t") do
+        e = e - 1
+    end
+    if s > e then return "" else return text:sub(s, e) end
+end
+
+-- 辅助函数：手动替换所有出现的子字符串 (区分大小写, 字面量查找)
+local function manual_replace_all_literal(text, find_literal, replace_with)
+    if not text or type(text) ~= "string" then return text end
+    if not find_literal or type(find_literal) ~= "string" or find_literal == "" then return text end 
+    if replace_with == nil or type(replace_with) ~= "string" then replace_with = "" end
+
+    local result = ""
+    local current_pos = 1
+    local find_len = #find_literal
+
+    while true do
+        local start_match = string.find(text, find_literal, current_pos, true) -- true for plain literal match
+        if start_match then
+            result = result .. text:sub(current_pos, start_match - 1) .. replace_with
+            current_pos = start_match + find_len
+        else
+            result = result .. text:sub(current_pos)
+            break
+        end
+    end
+    return result
+end
+
+-- 安全的JSON编码
+local function safe_json_encode(data)
+    if not JSON then
+        safe_print("JSON模块不可用，使用简单编码")
+        return "JSON_NOT_AVAILABLE"
+    end
+    
+    local success, result = pcall(JSON.encode, data)
+    if success then
+        return result
+    else
+        safe_print("JSON编码失败: " .. tostring(result))
+        return nil
+    end
+end
+
+-- 安全的JSON解码
+local function safe_json_decode(text)
+    if not text or text == "" then return nil end
+    if not JSON then
+        safe_print("JSON模块不可用，无法解码")
+        return nil
+    end
+    
+    local success, result = pcall(JSON.decode, text)
+    if success then
+        return result
+    else
+        safe_print("JSON解析失败: " .. tostring(result))
+        return nil
+    end
+end
+
+-- 安全的player操作
+local function safe_player_action(player, action_func, action_name_for_log)
+    local log_action_name = action_name_for_log or "未知操作"
+    if not player then
+        safe_print(string.format("safe_player_action: 'player' 参数为 nil (类型: %s)，无法执行操作 '%s'。", type(player), log_action_name))
+        -- 也许向全局广播一个更通用的错误，因为我们没有目标玩家
+        safe_broadcast(string.format("错误：尝试对无效玩家执行操作 '%s'。", log_action_name), "Red")
+        return
+    end
+    if type(action_func) ~= "function" then
+        safe_print(string.format("safe_player_action: 'action_func' 参数不是一个函数 (类型: %s)，无法执行操作 '%s' (玩家: %s)。", type(action_func), log_action_name, player.color or "未知"))
+        safe_broadcast(string.format("错误：操作 '%s' 的内部配置不正确。", log_action_name), "Red", player) -- 定向给玩家
+        return
+    end
+
+    -- 确保 player.print 存在 (如果 action_func 依赖它)
+    -- 您的 action_func (匿名函数 function(p) p.print(text) end) 确实依赖 player.print
+    if not player.print then
+        safe_print(string.format("safe_player_action: 'player.print' 不存在于提供的 player 对象中 (玩家: %s)，无法执行操作 '%s'。", player.color or "未知", log_action_name))
+        safe_broadcast(string.format("错误：无法向玩家 '%s' 显示消息 (操作: %s)。", player.color or "未知", log_action_name), "Orange", player)
+        return
+    end
+    
+    safe_print(string.format("safe_player_action: 准备为玩家 %s 执行操作 '%s'。", player.color or "未知", log_action_name))
+    local success, err = pcall(action_func, player)
+    if not success then
+        safe_print(string.format("safe_player_action: 执行操作 '%s' 时发生错误 for player %s: %s", log_action_name, player.color or "未知", tostring(err)))
+        -- 避免在错误处理中再次调用 player.print，以防它就是问题所在
+        safe_broadcast(string.format("执行操作 '%s' 时出错: %s", log_action_name, tostring(err)), "Red") -- 全局广播错误
+    end
+end
+
+-- Helper to safely get a property or call a method on a TTS Object
+local function get_obj_prop(obj, prop_name, is_method, default_val, ...)
+    if not obj then 
+        return default_val 
+    end
+    
+    local obj_type_str = type(obj)
+    if obj_type_str ~= 'userdata' and obj_type_str ~= 'table' then
+        return default_val 
+    end
+
+    local property_value_raw
+    local prop_access_success, prop_access_error = pcall(function() property_value_raw = obj[prop_name] end)
+
+    if not prop_access_success then
+        -- This means accessing obj[prop_name] itself (the field/method name) caused an error.
+        -- Example: Trying to access a field on a LuaGameObjectScript that truly doesn't exist at C++ level.
+        -- safe_print(string.format("get_obj_prop: Error accessing property/method '%s' on object %s (type: %s). Pcall Error: %s", prop_name, tostring(obj), obj_type_str, tostring(prop_access_error)))
+        return default_val
+    end
+    
+    local property_type_str = type(property_value_raw)
+
+    if is_method then
+        if property_type_str == 'function' then
+            local call_success, call_result = pcall(property_value_raw, obj, ...) 
+            if call_success then
+                return call_result
+            else
+                -- safe_print(string.format("get_obj_prop: Method call '%s' on object %s (type: %s) failed. Call Error: %s", prop_name, tostring(obj), obj_type_str, tostring(call_result)))
+                return default_val
+            end
+        else
+            -- safe_print(string.format("get_obj_prop: Property '%s' on object %s (type: %s) is not a function (it is '%s'). Cannot call as method.", prop_name, tostring(obj), obj_type_str, property_type_str))
+            return default_val
+        end
+    else -- direct property access (already retrieved as property_value_raw)
+        return property_value_raw 
+    end
+end
+
+-- 辅助函数：解析 "X Y" 格式的 offsetXY 字符串为数字
+local function parse_offset_xy_string(offset_str)
+    if not offset_str or type(offset_str) ~= "string" then return 80, -10 end -- Default if invalid
+    local x_str, y_str = offset_str:match("([%-?%d%.]+)%s+([%-?%d%.]+)")
+    local x = tonumber(x_str) or 80
+    local y = tonumber(y_str) or -10
+    return x, y
+end
+
+-- =====================================
+-- 🎮 游戏上下文收集系统 (API Informed Refactor)
+-- =====================================
+
+-- 尝试自动检测游戏名称 (MOVED BEFORE gather_game_info)
+local function detect_game_name()
+    local potential_game_names = {}
+    if not getObjects or type(getObjects) ~= 'function' then -- API Check
+        safe_print("detect_game_name: getObjects API is not available or not a function. Type: " .. type(getObjects))
+        return state.current_game_name or "未知游戏"
+    end
+
+    local success_go, all_objects = pcall(getObjects)
+    if not success_go or not all_objects then 
+        safe_print("detect_game_name: Call to getObjects failed or returned nil. Error: " .. tostring(all_objects))
+        return state.current_game_name or "未知游戏" 
+    end
+    if type(all_objects) ~= 'table' then
+        safe_print("detect_game_name: getObjects did not return a table (type: " .. type(all_objects) .. "). Cannot iterate.")
+        return state.current_game_name or "未知游戏"
+    end
+    safe_print(string.format("detect_game_name: Found %d objects to analyze.", #all_objects))
+
+    local game_title_keywords = {"rulebook", "rules", "manual", "instructions", "game board", "gameboard", "board", "playmat"}
+    local game_title_tags = {"rulebook", "game board", "rules"}
+
+    -- 内部辅助函数，用于安全地执行gsub
+    local function safe_gsub(text_input, pattern, replacement)
+        if not text_input or text_input == "" then return text_input or "" end
+        if type(text_input) ~= "string" then 
+            safe_print(string.format("detect_game_name/safe_gsub: input is not a string (type: %s), pattern: %s. Input: '%s'", type(text_input), pattern, tostring(text_input)))
+            return text_input
+        end
+        local success, result = pcall(string.gsub, text_input, pattern, replacement)
+        if success then
+            return result
+        else
+            safe_print(string.format("detect_game_name: string.gsub 调用失败 (模式: '%s')。错误: %s. Input: '%s'", pattern, tostring(result), text_input))
+            return text_input -- 返回原始文本
+        end
+    end
+
+    -- Priority 1:
+    for _, obj_instance in ipairs(all_objects) do
+        local name_lower = get_obj_prop(obj_instance, "getName", true, "")
+        if name_lower and name_lower ~= "" and type(name_lower) == "string" then name_lower = string.lower(name_lower) else name_lower = "" end
+        
+        local tags_tbl = get_obj_prop(obj_instance, "getTags", true, {})
+        local is_priority_object = false
+
+        for _, keyword in ipairs(game_title_keywords) do
+            if contains(name_lower, keyword) then is_priority_object = true; break; end
+        end
+        if not is_priority_object then
+            for _, tag_str in ipairs(tags_tbl) do
+                local tag_str_lower = tag_str
+                if tag_str_lower and tag_str_lower ~= "" and type(tag_str_lower) == "string" then tag_str_lower = string.lower(tag_str_lower) else tag_str_lower = "" end
+                for _, keyword_tag in ipairs(game_title_tags) do
+                    if tag_str_lower == keyword_tag then is_priority_object = true; break; end
+                end
+                if is_priority_object then break; end
+            end
+        end
+
+        if is_priority_object then
+            local original_name = get_obj_prop(obj_instance, "getName", true, "")
+            local cleaned_name = original_name
+
+            if cleaned_name and type(cleaned_name) == "string" then
+                cleaned_name = safe_gsub(cleaned_name, "%s*%([%w%s_.:/%-%?!]+%)$", "")
+                cleaned_name = safe_gsub(cleaned_name, "%s*%[[%w%s_.:/%-%?!]+%]]$", "") -- TTS uses ]] for end of block comments in some contexts, ensure this is OK
+                cleaned_name = safe_gsub(cleaned_name, "(?i)[-%s]*(rulebook|rules|manual|instructions|scripted|official|edition|game board|gameboard|game|book|playmat)[-%s]*", " ")
+                cleaned_name = safe_gsub(cleaned_name, "(?i)rules for", "")
+                cleaned_name = safe_gsub(cleaned_name, "^[Tt]he%s+", "") 
+                cleaned_name = safe_gsub(cleaned_name, "(?i)[Tt]abletop [Ss]imulator%s*[Mm]od", "")
+                cleaned_name = safe_gsub(cleaned_name, "(?i)[Bb]y%s+[%w%s]+$", "") 
+                cleaned_name = safe_gsub(cleaned_name, "(?i)[Vv]%d+[%.%d_]*", "") 
+                cleaned_name = safe_gsub(cleaned_name, "[_%-%.:/%?!]+|'(s)", " ")
+                cleaned_name = manual_replace_all_literal(cleaned_name, "&amp;", "and")
+                cleaned_name = safe_gsub(cleaned_name, "%s%s+", " ")
+                cleaned_name = manual_trim(cleaned_name)
+            else
+                cleaned_name = "" 
+            end
+            
+            if cleaned_name ~= "" and #cleaned_name > 2 and #cleaned_name < 70 then
+                local unique = true
+                for _,p_name_obj in ipairs(potential_game_names) do if p_name_obj.name == cleaned_name then unique=false; break; end end
+                if unique then table.insert(potential_game_names, {name = cleaned_name, priority = 1, len = #cleaned_name}) end
+            end
+        end
+    end
+
+    -- Priority 2:
+    if #potential_game_names == 0 then
+        safe_print("detect_game_name: No priority 1 names found. Starting priority 2 scan.")
+        for i, obj_instance in ipairs(all_objects) do
+            local original_name = get_obj_prop(obj_instance, "getName", true, "")
+            local nickname = get_obj_prop(obj_instance, "getNickname", true, "")
+            local obj_type = get_obj_prop(obj_instance, "type", false, "Unknown")
+            local scale_vec = get_obj_prop(obj_instance, "getScale", true, {x=1,y=1,z=1})
+            local current_name_to_check = original_name
+            if current_name_to_check == "" and nickname ~= "" then current_name_to_check = nickname end
+            local name_lower = string.lower(current_name_to_check or "")
+
+            if i <= 10 or (#name_lower > 5 and #name_lower < 70) then -- Log first few, and then only potential candidates
+                safe_print(string.format("detect_game_name (P2 Scan, Obj %d): Name: '%s', Nick: '%s', Type: %s, Scale: %s, %s, %s. Effective Lower: '%s'", 
+                    i, tostring(original_name), tostring(nickname), tostring(obj_type), 
+                    tostring(scale_vec.x), tostring(scale_vec.y), tostring(scale_vec.z), name_lower))
+            end
+
+            local is_large_custom = false
+            if obj_type and type(obj_type) == "string" then
+                is_large_custom = (string.sub(obj_type, 1, 7) == "Custom_" and (scale_vec.x > 2 or scale_vec.y > 2 or scale_vec.z > 2))
+            end
+
+            if #name_lower > 5 and #name_lower < 70 and (is_large_custom or not (contains(name_lower, "zone") or contains(name_lower, "button") or contains(name_lower, "dice") or contains(name_lower, "card") or contains(name_lower, "token") or contains(name_lower, "marker") or contains(name_lower, "bag") or contains(name_lower, "deck") or contains(name_lower, "mat") or contains(name_lower, "tray") or contains(name_lower, "holder"))) then
+                local cleaned_name = original_name
+                if cleaned_name and type(cleaned_name) == "string" then
+                    cleaned_name = safe_gsub(cleaned_name, "%s*%([%w%s_.:/%-%?!]+%)$", "") 
+                    cleaned_name = safe_gsub(cleaned_name, "(?i)[-%s]*(scripted|official)[-%s]*", " ")
+                    cleaned_name = safe_gsub(cleaned_name, "[_%-%.:/%?!]+|'(s)", " ") 
+                    cleaned_name = manual_replace_all_literal(cleaned_name, "&amp;", "and")
+                    cleaned_name = safe_gsub(cleaned_name, "%s%s+", " ") 
+                    cleaned_name = manual_trim(cleaned_name)
+                else
+                    cleaned_name = ""
+                end
+                if cleaned_name ~= "" and #cleaned_name > 3 then
+                    local unique = true
+                    for _,p_name_obj in ipairs(potential_game_names) do if p_name_obj.name == cleaned_name then unique=false; break; end end
+                    if unique then table.insert(potential_game_names, {name = cleaned_name, priority = 2, len = #cleaned_name}) end
+                end
+            end
+        end
+    end
+    
+    -- Priority 3: Game Save Name
+    if #potential_game_names == 0 then
+        safe_print("detect_game_name: No priority 1 or 2 names found. Checking game save name (Info.game_name).")
+        local game_save_name = ""
+        if Info and type(Info) == 'userdata' then -- CORRECTED: Info should be userdata
+            game_save_name = get_obj_prop(Info, "game_name", false, "")
+            safe_print("detect_game_name (P3): Info.game_name raw value: '" .. tostring(game_save_name) .. "'")
+        else
+            safe_print("detect_game_name (P3): Info global is not available or not userdata. Type: " .. type(Info))
+        end
+        
+        if game_save_name and game_save_name ~= "" then
+            local cleaned_name = game_save_name
+            if cleaned_name and type(cleaned_name) == "string" then
+                cleaned_name = safe_gsub(cleaned_name, "%s*%([%w%s_.:/%-%?!]+%)$", "")
+                cleaned_name = safe_gsub(cleaned_name, "[_%-%.:/%-%?!]+|'(s)", " ") 
+                cleaned_name = manual_replace_all_literal(cleaned_name, "&amp;", "and")
+                cleaned_name = safe_gsub(cleaned_name, "%s%s+", " ") 
+                cleaned_name = manual_trim(cleaned_name)
+            else
+                cleaned_name = ""
+            end
+            if cleaned_name ~= "" and #cleaned_name > 2 then
+                table.insert(potential_game_names, {name = cleaned_name, priority = 3, len = #cleaned_name})
+            end
+        end
+    end
+
+    local final_name_to_return
+    if #potential_game_names > 0 then
+        table.sort(potential_game_names, function(a,b) 
+            if a.priority ~= b.priority then return a.priority < b.priority end
+            return a.len > b.len
+        end)
+        if potential_game_names[1].name and potential_game_names[1].name ~= "" then 
+            final_name_to_return = potential_game_names[1].name 
+        end
+    end
+
+    if not final_name_to_return then
+      final_name_to_return = state.current_game_name or "未知游戏"
+    end
+    
+    if final_name_to_return == "未知游?" then 
+        safe_print("detect_game_name: Correcting '未知游?' to '未知游戏'")
+        final_name_to_return = "未知游戏"
+    end
+
+    safe_print(string.format("detect_game_name: Determined game name: '%s' (length: %d)", tostring(final_name_to_return), (final_name_to_return and type(final_name_to_return) == 'string' and #final_name_to_return or 0)))
+    return final_name_to_return
+end
+
+local function gather_game_info()
+    local game_info = {
+        timestamp = os.time(),
+        game_name = state.current_game_name or "未知游戏", 
+        player_count = 0,
+        seated_players_colors = {},
+        turn_info = {
+            current_player_color = "N/A",
+            turn_order = {},
+            round = nil, -- Optional, may not exist in all games
+            phase = nil  -- Optional, may not exist in all games
+        },
+        game_mode = nil -- e.g., "Standard", "Hotseat"
+    }
+
+    -- Try to detect/update game name
+    safe_print("gather_game_info: Attempting to detect game name. Current state.current_game_name: '" .. tostring(state.current_game_name) .. "'")
+    local gn_success, detected_name_val = pcall(detect_game_name)
+    if gn_success and detected_name_val and type(detected_name_val) == 'string' and detected_name_val ~= "" and detected_name_val ~= "未知游戏" then
+        if state.current_game_name ~= detected_name_val then
+            safe_print("gather_game_info: Game name CHANGED from '" .. state.current_game_name .. "' to '" .. detected_name_val .. "'")
+            state.current_game_name = detected_name_val
+        else
+             safe_print("gather_game_info: Detected game name '" .. detected_name_val .. "' matches current state.current_game_name.")
+        end
+        game_info.game_name = detected_name_val
+    elseif not gn_success then
+        safe_print("gather_game_info: detect_game_name call failed. Error: " .. tostring(detected_name_val)) 
+    else
+        safe_print("gather_game_info: detect_game_name did not return a new valid name (returned: '" .. tostring(detected_name_val) .. "', type: "..type(detected_name_val).."). Using current: '"..tostring(game_info.game_name).."'")
+    end
+
+    if getSeatedPlayers and type(getSeatedPlayers) == 'function' then -- API Check
+        local success_sp, seated_player_colors_tbl = pcall(getSeatedPlayers)
+        if success_sp and seated_player_colors_tbl and type(seated_player_colors_tbl) == 'table' then
+            game_info.seated_players_colors = seated_player_colors_tbl
+            game_info.player_count = #seated_player_colors_tbl
+            safe_print("gather_game_info: Found " .. game_info.player_count .. " seated players.")
+        else 
+            safe_print("gather_game_info: Call to getSeatedPlayers failed or returned invalid data. Error/Data: " .. tostring(seated_player_colors_tbl))
+        end
+    else 
+        safe_print("gather_game_info: getSeatedPlayers API is not available or not a function. Type: " .. type(getSeatedPlayers)) 
+    end
+
+    if Turn and type(Turn) == 'table' then -- API Check for Turn table
+        game_info.turn_info.current_player_color = get_obj_prop(Turn, "getTurnColor", true, "N/A")
+        game_info.turn_info.turn_order = get_obj_prop(Turn, "getTurnOrder", true, {})
+        game_info.turn_info.round = get_obj_prop(Turn, "getRound", true, nil) -- May return nil
+        game_info.turn_info.phase = get_obj_prop(Turn, "getPhase", true, nil) -- May return nil
+    else
+        safe_print("gather_game_info: Turn API is not available or not a table. Type: " .. type(Turn))
+    end
+    
+    if Info and type(Info) == 'userdata' then -- CORRECTED: Info should be userdata
+        game_info.game_mode = get_obj_prop(Info, "GameMode", false, nil) 
+    else
+        safe_print("gather_game_info: Info API is not available or not userdata. Type: " .. type(Info))
+    end
+
+    return game_info
+end
+
+local function gather_objects_info()
+    if not state.include_objects then return {} end
+
+    local objects_summary = {
+        total_objects = 0,
+        by_type = {},
+        cards = {}, dice = {}, tokens = {}, figures = {}, boards = {}, decks = {}, bags = {}, 
+        custom_models = {}, custom_tokens = {}, custom_tiles = {}, custom_cards = {},
+        custom_dice = {}, custom_figurines = {}, custom_assetbundles = {},
+        other = {}
+    }
+
+    if not getObjects then 
+        safe_print("getObjects函数不可用 (gather_objects_info)")
+        return objects_summary 
+    end
+    
+    local success_go, all_objects_array = pcall(getObjects)
+    if not success_go or not all_objects_array then
+        safe_print("获取对象列表失败 (gather_objects_info): " .. tostring(all_objects_array))
+        return objects_summary
+    end
+
+    objects_summary.total_objects = #all_objects_array
+    for _, obj_instance in ipairs(all_objects_array) do
+        local data = {}
+        local quantity
+
+        if not obj_instance or type(obj_instance) ~= 'userdata' then 
+            objects_summary.total_objects = objects_summary.total_objects - 1 
+            goto continue_object_loop -- Lua goto needs a label
+        end
+
+        data.guid = get_obj_prop(obj_instance, "getGUID", true, "N/A-"..tostring(math.random(1,10000)))
+        data.name = get_obj_prop(obj_instance, "getName", true, "")
+        data.nickname = get_obj_prop(obj_instance, "getNickname", true, "")
+        data.description = get_obj_prop(obj_instance, "getDescription", true, "")
+        data.type = get_obj_prop(obj_instance, "type", false, "Unknown") -- Object.type is a property
+        data.tags = get_obj_prop(obj_instance, "getTags", true, {})
+        data.locked = get_obj_prop(obj_instance, "getLock", true, false)
+        data.gm_notes = get_obj_prop(obj_instance, "getGMNotes", true, "")
+        data.memo = get_obj_prop(obj_instance, "getMemo", true, nil) -- Object.getMemo()
+        data.script_id = get_obj_prop(obj_instance, "getVar", true, nil, "script_id") -- Object.getVar("script_id")
+        data.position = get_obj_prop(obj_instance, "getPosition", true, {x=0,y=0,z=0})
+        -- data.rotation = get_obj_prop(obj_instance, "getRotation", true, {x=0,y=0,z=0}) -- Can be verbose
+        -- data.scale = get_obj_prop(obj_instance, "getScale", true, {x=1,y=1,z=1}) -- Can be verbose
+
+        if not objects_summary.by_type[data.type] then objects_summary.by_type[data.type] = 0 end
+        objects_summary.by_type[data.type] = objects_summary.by_type[data.type] + 1
+
+        if data.type == "Card" or data.type == "Custom_Card" then
+            data.is_face_up = get_obj_prop(obj_instance, "isFaceUp", true, nil)
+            data.card_id = get_obj_prop(obj_instance, "getCardID", true, nil) -- Object.getCardID()
+            local card_details_success, card_def = pcall(function() return obj_instance.getCardDetails() end) 
+            if card_details_success and card_def then data.card_details = card_def end 
+            if data.type == "Card" then table.insert(objects_summary.cards, data) else table.insert(objects_summary.custom_cards, data) end
+        elseif data.type == "Deck" or (data.type == "Infinite" and (contains(data.name:lower(), "deck") or contains(data.nickname:lower(),"deck"))) then
+            data.count = get_obj_prop(obj_instance, "getQuantity", true, 0) -- For Decks (number of cards), Infinite (value in XML if stack)
+            local contained_objs_data = get_obj_prop(obj_instance, "getObjects", true, nil) -- For Decks/Bags to list contents
+            if contained_objs_data then 
+                data.contained_guids = {}
+                for _,c_obj in ipairs(contained_objs_data) do
+                    table.insert(data.contained_guids, get_obj_prop(c_obj, "guid", false, "INVALID_GUID"))
+                end
+                data.contained_count = #contained_objs_data
+            end
+            table.insert(objects_summary.decks, data)
+        elseif data.type == "Bag" or (data.type == "Infinite" and (contains(data.name:lower(),"bag") or contains(data.nickname:lower(),"bag"))) then
+            data.contained_count = 0
+            local contained_objs_data = get_obj_prop(obj_instance, "getObjects", true, nil) -- For Bags to list contents
+            if contained_objs_data then 
+                data.contained_guids = {}
+                 for _,c_obj in ipairs(contained_objs_data) do
+                    table.insert(data.contained_guids, get_obj_prop(c_obj, "guid", false, "INVALID_GUID"))
+                end
+                data.contained_count = #contained_objs_data
+            end
+            table.insert(objects_summary.bags, data)
+        elseif data.type == "Dice" or data.type == "Custom_Dice" then
+            data.value = get_obj_prop(obj_instance, "getRotationValue", true, 0)
+            -- data.values = get_obj_prop(obj_instance, "getRotationValues", true, nil) -- Can be verbose for complex dice
+            if data.type == "Dice" then table.insert(objects_summary.dice, data) else table.insert(objects_summary.custom_dice, data) end
+        elseif data.type == "Counter" or data.type == "Chip" then
+            data.value = get_obj_prop(obj_instance, "getValue", true, nil)
+            table.insert(objects_summary.tokens, data) -- Treat as token
+        elseif data.type == "Figurine" then table.insert(objects_summary.figures, data)
+        elseif data.type == "Custom_Figurine" then table.insert(objects_summary.custom_figurines, data)
+        elseif data.type == "GameBoard" then table.insert(objects_summary.boards, data)
+        elseif data.type == "Custom_Token" then 
+            data.value = get_obj_prop(obj_instance, "getValue", true, nil) -- Often custom tokens also use this
+            table.insert(objects_summary.custom_tokens, data)
+        elseif data.type == "Custom_Model" then table.insert(objects_summary.custom_models, data)
+        elseif data.type == "Custom_Tile" then table.insert(objects_summary.custom_tiles, data)
+        elseif data.type == "Custom_Assetbundle" then table.insert(objects_summary.custom_assetbundles, data)
+        else 
+            -- Generic token/marker check based on name for items not fitting above types
+            if contains(data.name:lower(), "token") or contains(data.nickname:lower(), "token") or 
+               contains(data.name:lower(), "marker") or contains(data.nickname:lower(), "marker") or
+               contains(data.name:lower(), "counter") or contains(data.nickname:lower(), "counter") then
+                table.insert(objects_summary.tokens, data)
+            else
+                table.insert(objects_summary.other, data)
+            end
+        end
+        
+        quantity = get_obj_prop(obj_instance, "getQuantity", true, 0) -- For stackable items
+        if quantity > 1 then data.quantity_in_stack = quantity end 
+
+        if string.sub(data.type, 1, 7) == "Custom_" then
+            local custom_obj_data = get_obj_prop(obj_instance, "getCustomObject", true, nil)
+            if custom_obj_data then 
+                data.custom_data = {}
+                if custom_obj_data.image then data.custom_data.image_url = custom_obj_data.image end
+                if custom_obj_data.mesh then data.custom_data.mesh_url = custom_obj_data.mesh end
+                if custom_obj_data.type then data.custom_data.custom_type_id = custom_obj_data.type end -- e.g. CustomToken, CustomCard etc.
+            end
+        end
+        
+        ::continue_object_loop::
+    end
+    return objects_summary
+end
+
+local function gather_players_info()
+    if not state.include_players then return {} end
+    local players_map = {}
+    if not getSeatedPlayers or type(getSeatedPlayers) ~= 'function' then -- API Check
+        safe_print("gather_players_info: getSeatedPlayers API is not available or not a function. Type: " .. type(getSeatedPlayers))
+        return players_map 
+    end
+
+    local success_sp, seated_colors_tbl = pcall(getSeatedPlayers)
+    if not success_sp or not seated_colors_tbl or type(seated_colors_tbl) ~= 'table' then
+        safe_print("gather_players_info: Call to getSeatedPlayers failed or returned invalid data. Error/Data: " .. tostring(seated_colors_tbl))
+        return players_map
+    end
+    safe_print(string.format("gather_players_info: getSeatedPlayers returned %d color strings.", #seated_colors_tbl))
+
+    for i, color_string in ipairs(seated_colors_tbl) do
+        safe_print(string.format("gather_players_info: Processing player %d, color_string: '%s' (type: %s)", i, tostring(color_string), type(color_string)))
+        
+        if color_string and type(color_string) == 'string' then
+            local player_entry_exists = Player and Player[color_string]
+            local player_entry_type = type(player_entry_exists) 
+            safe_print(string.format("gather_players_info: Checking Player['%s']. Exists? %s. Type: %s", color_string, tostring(player_entry_exists ~= nil), player_entry_type))
+
+            if player_entry_exists and player_entry_type == 'userdata' then
+                local p_instance = Player[color_string] 
+                
+                safe_print(string.format("gather_players_info: Player['%s'] is userdata. Steam Name: '%s'", 
+                                    color_string, tostring(get_obj_prop(p_instance, "steam_name", false, "N/A"))))
+
+                local p_data = {
+                    color = color_string,
+                    steam_name = get_obj_prop(p_instance, "steam_name", false, "N/A"),
+                    team = get_obj_prop(p_instance, "team", false, "N/A"),
+                    promoted = get_obj_prop(p_instance, "promoted", false, false),
+                    blindfolded = get_obj_prop(p_instance, "getBlindfolded", true, false),
+                    host = get_obj_prop(p_instance, "host", false, false),
+                    ping = get_obj_prop(p_instance, "ping", false, 0),
+                    hand_zone_info = { object_guids = {}, object_count = 0 },
+                    held_object_info = { guid = nil, name = nil, type = nil },
+                    selected_objects_count = 0
+                }
+
+                local hand_objs_array = get_obj_prop(p_instance, "getHandObjects", true, nil)
+                if hand_objs_array then 
+                    p_data.hand_zone_info.object_count = #hand_objs_array
+                    for _, h_obj in ipairs(hand_objs_array) do
+                        table.insert(p_data.hand_zone_info.object_guids, get_obj_prop(h_obj, "guid", false, "INVALID_GUID"))
+                    end
+                end
+
+                local held_obj_array = get_obj_prop(p_instance, "getHoldingObjects", true, nil)
+                if held_obj_array and #held_obj_array > 0 then
+                    local primary_held_obj = held_obj_array[1] 
+                    p_data.held_object_info.guid = get_obj_prop(primary_held_obj, "guid", false, "N/A")
+                    p_data.held_object_info.name = get_obj_prop(primary_held_obj, "getName", true, "N/A")
+                    p_data.held_object_info.type = get_obj_prop(primary_held_obj, "type", false, "N/A")
+                end
+                
+                local selected_objs_array = get_obj_prop(p_instance, "getSelectedObjects", true, nil)
+                if selected_objs_array then p_data.selected_objects_count = #selected_objs_array end
+                
+                players_map[color_string] = p_data
+            else
+                safe_print(string.format("gather_players_info: Player['%s'] instance not found, is nil, or not userdata (type: %s). Skipping data population.", tostring(color_string), player_entry_type))
+            end
+        else 
+            safe_print(string.format("gather_players_info: Invalid color_string at index %d ('%s', type: %s). Skipping player processing.", i, tostring(color_string), type(color_string)))
+        end
+        -- ::continue_player_loop:: -- Label is no longer needed
+    end
+    return players_map
+end
+
+local function gather_zones_info()
+    if not state.include_zones then return {} end
+    local zones_data = { scripting_zones = {}, layout_zones = {}, other_zones = {} }
+    if not getZones or type(getZones) ~= 'function' then -- API Check
+        safe_print("gather_zones_info: getZones API is not available or not a function. Type: " .. type(getZones))
+        return zones_data 
+    end
+
+    local success_gz, zones_list_array = pcall(getZones)
+    if not success_gz or not zones_list_array or type(zones_list_array) ~= 'table' then
+        safe_print("gather_zones_info: Call to getZones failed or returned invalid data. Error/Data: " .. tostring(zones_list_array))
+        return zones_data
+    end
+    safe_print(string.format("gather_zones_info: Found %d zones.", #zones_list_array))
+
+    for _, zone_instance in ipairs(zones_list_array) do
+        if zone_instance and type(zone_instance) == 'userdata' then
+            local z_data = {
+                guid = get_obj_prop(zone_instance, "getGUID", true, "N/A-"..tostring(math.random(1,10000))),
+                type = get_obj_prop(zone_instance, "type", false, "Unknown"), 
+                script_id = get_obj_prop(zone_instance, "getVar", true, nil, "script_id"),
+                memo = get_obj_prop(zone_instance, "getMemo", true, nil),
+                contained_objects_count = 0,
+                contained_object_guids = {}
+                -- transform details (position, rotation, scale, bounds) can be verbose
+                -- scale = get_obj_prop(zone_instance, "getScale", true, {x=1,y=1,z=1}), 
+                -- bounds = get_obj_prop(zone_instance, "getBounds", true, nil) 
+            }
+            local contained_in_zone_array = get_obj_prop(zone_instance, "getObjects", true, nil)
+            if contained_in_zone_array then 
+                z_data.contained_objects_count = #contained_in_zone_array
+                for _, c_obj in ipairs(contained_in_zone_array) do
+                    table.insert(z_data.contained_object_guids, get_obj_prop(c_obj, "guid", false, "INVALID_GUID"))
+                end
+            end
+            
+            if z_data.type == "ScriptingTrigger" or z_data.type == "ScriptingZone" then
+                table.insert(zones_data.scripting_zones, z_data)
+            elseif z_data.type == "LayoutZone" then
+                 table.insert(zones_data.layout_zones, z_data)
+            else
+                table.insert(zones_data.other_zones, z_data)
+            end
+        end
+    end
+    return zones_data
+end
+
+local function gather_notebook_info()
+    if not state.include_notebook then return {} end 
+    local notebook_data = { tabs = {} }
+    if not Notes or type(Notes) ~= 'table' then -- API Check for Notes table
+        safe_print("gather_notebook_info: Notes API is not available or not a table. Type: " .. type(Notes))
+        return notebook_data 
+    end
+
+    local tab_indices_array = get_obj_prop(Notes, "getTabs", true, nil)
+    if not tab_indices_array or type(tab_indices_array) ~= 'table' then 
+        safe_print("gather_notebook_info: Notes.getTabs() failed or returned invalid data. Data: " .. tostring(tab_indices_array))
+        return notebook_data 
+    end
+    safe_print(string.format("gather_notebook_info: Found %d notebook tabs info objects.", #tab_indices_array))
+
+    for _, tab_info_obj in ipairs(tab_indices_array) do 
+        if tab_info_obj and type(tab_info_obj) == 'table' and tab_info_obj.index and tab_info_obj.title then
+             local content = get_obj_prop(Notes, "getNotes", true, "", tab_info_obj.index)
+             table.insert(notebook_data.tabs, {
+                 index = tab_info_obj.index,
+                 title = tab_info_obj.title,
+                 content_length = #content,
+                 content_preview = string.sub(content, 1, 200) .. (#content > 200 and "..." or "")
+             }) 
+        end
+    end
+    return notebook_data
+end
+
+-- 主要上下文收集函数
+local function gather_game_context()
+    if not state.auto_context then 
+        safe_print("自动上下文收集已禁用。")
+        return 
+    end
+    safe_print("收集游戏上下文...")
+    
+    -- Game name detection is now part of gather_game_info and updates state.current_game_name directly.
+
+    state.game_context = {
+        game_info = gather_game_info(), 
+        objects = gather_objects_info(),
+        players = gather_players_info(),
+        zones = gather_zones_info(),
+        notebook = gather_notebook_info(),
+        last_updated = os.time()
+    }
+    safe_print("上下文收集完成，游戏: ".. state.current_game_name .. ", 对象: " .. (state.game_context.objects and state.game_context.objects.total_objects or 0))
+    if UI and UI.setXml and not state.ui_minimized then -- Avoid refreshing UI if minimized
+        local ui_update_success = pcall(create_ui) 
+        if not ui_update_success then safe_print("create_ui call failed during context gather") end
+    end
+end
+
+-- =====================================
+-- 🧠 智能提示词生成系统
+-- =====================================
+
+-- 生成游戏状态摘要 (Refactored to use new context structure)
+local function generate_game_summary()
+    local context = state.game_context
+    if not context or not context.game_info then return "无游戏状态信息或上下文未初始化" end
+    
+    local summary_parts = {}
+    table.insert(summary_parts, "当前游戏: " .. (context.game_info.game_name or "未知") .. " (模式: " .. (context.game_info.game_mode or "未知") .. ")")
+    table.insert(summary_parts, "玩家数量: " .. tostring(context.game_info.player_count or 0) .. " (颜色: " .. (table.concat(context.game_info.seated_players_colors or {}, ", ") or "无") .. ")")
+    
+    if context.game_info.turn_info then
+        local ti = context.game_info.turn_info
+        table.insert(summary_parts, "当前回合玩家: " .. (ti.current_player_color or "N/A"))
+        if ti.round then table.insert(summary_parts, "回合数: " .. tostring(ti.round)) end
+        if ti.phase then table.insert(summary_parts, "阶段: " .. tostring(ti.phase)) end
+        if ti.turn_order and #ti.turn_order > 0 then table.insert(summary_parts, "行动顺序: " .. table.concat(ti.turn_order, " -> ")) end
+    end
+
+    if context.objects then
+        table.insert(summary_parts, "\n[桌面对象统计]")
+        table.insert(summary_parts, "  总数: " .. tostring(context.objects.total_objects or 0))
+        if context.objects.by_type then
+            for obj_type, count in pairs(context.objects.by_type) do
+                table.insert(summary_parts, "  - " .. tostring(obj_type) .. ": " .. tostring(count))
+            end
+        end
+        -- Could add more details about specific object categories if needed, e.g., #context.objects.cards
+    end
+
+    if context.players and next(context.players) then -- Check if players table is not empty
+        table.insert(summary_parts, "\n[玩家状态]")
+        for color, p_data in pairs(context.players) do
+            local p_summary = "  玩家 " .. tostring(color) .. " (" .. (p_data.steam_name or "匿名") .. "): 手牌区" .. tostring(p_data.hand_zone_info.object_count or 0) .. "张, 手持" .. ((p_data.held_object_info and p_data.held_object_info.guid and "1" or "0")) .. "件, 选中" .. tostring(p_data.selected_objects_count or 0) .. "件"
+            if p_data.held_object_info and p_data.held_object_info.guid then
+                p_summary = p_summary .. " (持: " .. (p_data.held_object_info.name or "未命名") .. " - " .. (p_data.held_object_info.type or "未知类型") .. ")"
+            end
+            table.insert(summary_parts, p_summary)
+        end
+    end
+
+    if context.zones then
+        local zone_counts = "脚本区: " .. tostring(#(context.zones.scripting_zones or {})) .. ", 布局区: " .. tostring(#(context.zones.layout_zones or {})) .. ", 其他区: " .. tostring(#(context.zones.other_zones or {}))
+        table.insert(summary_parts, "\n[区域信息] " .. zone_counts)
+    end
+
+    if context.notebook and context.notebook.tabs and #context.notebook.tabs > 0 then
+        table.insert(summary_parts, "\n[笔记] 共 " .. tostring(#context.notebook.tabs) .. " 个标签页")
+        for i, tab_data in ipairs(context.notebook.tabs) do
+            if i > 3 then -- Limit preview to first 3 tabs to keep summary concise
+                table.insert(summary_parts, "  ...等 " .. tostring(#context.notebook.tabs - 3 + 1) .. " 个标签页")
+                break
+            end
+            table.insert(summary_parts, "  标签 " .. tostring(tab_data.index) .. ": \"" .. tostring(tab_data.title) .. "\" (长度: " .. tostring(tab_data.content_length) .. ", 预览: " .. tostring(tab_data.content_preview) .. ")")
+        end
+    end
+        
+    return table.concat(summary_parts, "\n")
+end
+
+-- 生成基础系统提示词
+local function generate_system_prompt()
+    return [[你是一个专业的桌游助手，具有以下能力：
+1. 规则解释：基于提供的游戏规则文档，准确解释游戏规则
+2. 策略建议：根据当前游戏状态，提供合理的策略建议
+3. 流程指导：帮助玩家了解游戏流程和回合顺序
+4. 问题解答：回答关于游戏机制、计分、胜负条件等问题
+请始终：
+- 基于提供的游戏状态和规则文档回答
+- 如果规则不明确，请说明需要查阅具体规则
+- 提供简洁、准确的回答
+- 如果涉及策略建议，请提供多个选择方案]]
+end
+
+-- 生成完整的LLM查询上下文
+local function generate_llm_context(user_question)
+    local context_parts = {}
+    table.insert(context_parts, "=== 系统角色 ===")
+    table.insert(context_parts, generate_system_prompt())
+    
+    if state.rules_document and state.rules_document ~= "" then
+        table.insert(context_parts, "\n=== 游戏规则文档 ===")
+        table.insert(context_parts, state.rules_document)
+    end
+    
+    if state.game_context and state.game_context.game_info then
+        table.insert(context_parts, "\n=== 当前游戏状态 ===")
+        table.insert(context_parts, generate_game_summary())
+    else
+        table.insert(context_parts, "\n=== 当前游戏状态 ===")
+        table.insert(context_parts, "游戏状态信息不可用或未收集。")
+    end
+    
+    table.insert(context_parts, "\n=== 玩家问题 ===")
+    table.insert(context_parts, user_question or "未提供问题。")
+    
+    return table.concat(context_parts, "\n")
+end
+
+-- =====================================
+-- 📚 规则文档管理系统
+-- =====================================
+
+-- 加载规则文档
+local function load_rules_document(document_text)
+    if not document_text or document_text == "" then
+        safe_broadcast("❌ 规则文档为空", {1, 0, 0})
+        return false
+    end
+    state.rules_document = document_text
+    safe_broadcast("✅ 规则文档已加载（" .. #document_text .. " 字符）")
+    return true
+end
+
+-- 清除规则文档
+local function clear_rules_document()
+    state.rules_document = ""
+    safe_broadcast("✅ 规则文档已清除")
+end
+
+-- 尝试自动检测游戏名称
+-- DELETED
+
+-- =====================================
+-- 🔗 LLM连接 (增强版) - 支持Ollama和Gemini
+-- =====================================
+
+-- 发送Gemini API请求的辅助函数
+local function send_gemini_request(api_key, model_name, prompt_text, player_for_response)
+    if not WebRequest or not WebRequest.custom then
+        safe_broadcast("❌ WebRequest.custom方法不可用 (Gemini)", {1,0,0}, player_for_response)
+        return
+    end
+    if not JSON or not safe_json_encode or not safe_json_decode then -- 确保JSON工具可用
+        safe_broadcast("❌ JSON模块或相关安全函数不可用 (Gemini)", {1,0,0}, player_for_response)
+        return
+    end
+    if not api_key or api_key == "" then
+        safe_broadcast("❌ Gemini API Key未配置。请使用 'tc config gemini <API_KEY>' 进行配置。", {1,0,0}, player_for_response)
+        return
+    end
+
+    local api_url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model_name .. ":generateContent?key=" .. api_key
+    
+    local request_body = {
+        contents = {
+            {
+                parts = {
+                    {text = prompt_text}
+                }
+            }
+        }
+        -- 可以根据需要添加 generationConfig 等参数
+        -- generationConfig = {
+        --    temperature = 0.7,
+        --    maxOutputTokens = 1024,
+        -- }
+    }
+
+    local json_body = safe_json_encode(request_body)
+    if not json_body then
+        safe_broadcast("❌ 无法编码Gemini请求数据", {1,0,0}, player_for_response)
+        return
+    end
+
+    safe_print("发送Gemini请求到: " .. model_name .. " (上下文长度: " .. #prompt_text .. ")")
+
+    local headers = { ["Content-Type"] = "application/json" }
+
+    pcall(WebRequest.custom, api_url, "POST", true, json_body, headers, function(request)
+        if request.is_error then
+            safe_print("Gemini API错误: " .. tostring(request.error))
+            safe_print("Gemini原始错误响应: " .. tostring(request.text))
+            safe_broadcast("❌ Gemini API请求失败: " .. tostring(request.error), {1,0,0}, player_for_response)
+            if request.text then
+                local err_data = safe_json_decode(request.text)
+                if err_data and err_data.error and err_data.error.message then
+                    safe_broadcast("错误详情: " .. err_data.error.message, {1,0.5,0}, player_for_response)
+                end
+            end
+        else
+            safe_print("Gemini响应成功, 长度: " .. #request.text)
+            local data = safe_json_decode(request.text)
+            
+            if data and data.candidates and data.candidates[1] and data.candidates[1].content and data.candidates[1].content.parts then
+                local full_response_text = ""
+                for _, part in ipairs(data.candidates[1].content.parts) do
+                    if part.text then
+                        full_response_text = full_response_text .. part.text
+                    end
+                end
+                
+                if full_response_text ~= "" then
+                    state.success_count = (state.success_count or 0) + 1
+                    safe_broadcast("🤖 " .. full_response_text, nil, player_for_response)
+                else
+                    safe_broadcast("❌ Gemini回复中未找到有效文本内容。原始响应见日志。", {1,0.5,0}, player_for_response)
+                    safe_print("原始Gemini响应 (解析后无文本): " .. request.text)
+                end
+            elseif data and data.error then -- 处理API返回的结构化错误
+                safe_print("Gemini API返回错误: " .. data.error.message)
+                safe_broadcast("❌ Gemini API返回错误: " .. data.error.message, {1,0.5,0}, player_for_response)
+            else
+                safe_broadcast("❌ 无法解析Gemini回复的结构。原始响应见日志。", {1,0.5,0}, player_for_response)
+                safe_print("原始Gemini响应: " .. request.text)
+            end
+        end
+    end)
+end
+
+local function test_llm_connection(requesting_player) -- 添加 requesting_player 参数
+    if state.llm_provider == "ollama" then
+        safe_broadcast("🔍 测试Ollama连接...", nil, requesting_player) -- 定向初始消息
+        if not WebRequest or not WebRequest.custom then safe_broadcast("❌ WebRequest不可用", {1,0,0}, requesting_player); return end
+        if not JSON then safe_broadcast("❌ JSON模块不可用", {1,0,0}, requesting_player); return end
+        
+        local request_data = { model = state.ollama_model, prompt = "请简单回复'Ollama测试成功'", stream = false }
+        local json_data = safe_json_encode(request_data)
+        if not json_data then safe_broadcast("❌ 无法编码Ollama请求数据", {1,0,0}, requesting_player); return end
+        
+        safe_print("发送Ollama测试请求到: " .. state.ollama_url .. "/api/generate")
+        local headers = { ["Content-Type"] = "application/json" }
+        
+        pcall(WebRequest.custom, state.ollama_url .. "/api/generate", "POST", true, json_data, headers, function(request)
+            if request.is_error then
+                safe_print("Ollama连接错误: " .. tostring(request.error))
+                safe_broadcast("❌ Ollama连接失败: " .. tostring(request.error), {1,0,0}, requesting_player)
+            else
+                safe_print("Ollama响应状态: 成功, 长度: " .. #request.text)
+                local data = safe_json_decode(request.text)
+                if data and data.response then
+                    safe_broadcast("✅ Ollama测试成功！AI回复: " .. data.response, {0,1,0}, requesting_player)
+                else
+                    safe_broadcast("❌ Ollama响应解析失败。原始响应见日志。", {1,0.5,0}, requesting_player)
+                    safe_print("原始Ollama响应: " .. request.text)
+                end
+            end
+        end)
+    elseif state.llm_provider == "gemini" then
+        safe_broadcast("🔍 测试Gemini API连接...", nil, requesting_player) -- 定向初始消息
+        if not state.gemini_key or state.gemini_key == "" then
+             safe_broadcast("❌ Gemini API Key未配置。请使用 'tc config gemini <API_KEY>' 进行配置。", {1,0,0}, requesting_player)
+             return
+        end
+        send_gemini_request(state.gemini_key, state.gemini_model, "请简单回复'Gemini测试成功'，无需任何markdown或其他格式。", requesting_player)
+    else
+        safe_broadcast("❌ 未配置LLM提供商。请使用 'tc config ollama ...' 或 'tc config gemini ...'。", {1,0,0}, requesting_player)
+    end
+end
+
+local function query_llm(question, player)
+    if not question or question == "" then 
+        safe_player_action(player, function(p) p.print("问题不能为空。") end)
+        return 
+    end
+    state.query_count = (state.query_count or 0) + 1
+    
+    if state.llm_provider == "none" then
+        safe_broadcast("❌ 未配置LLM提供商。请使用 'tc config ollama ...' 或 'tc config gemini ...'。", {1,0,0})
+        return
+    end
+
+    safe_broadcast("🤔 ["..state.llm_provider.."] 正在分析游戏状态并查询: " .. question)
+
+    if state.auto_context then
+        local context_success, context_err = pcall(gather_game_context)
+        if not context_success then safe_print("gather_game_context失败: " .. tostring(context_err)) end
+    end
+
+    local llm_context_success, full_context = pcall(generate_llm_context, question)
+    if not llm_context_success then
+        safe_print("generate_llm_context失败: " .. tostring(full_context))
+        full_context = "基础查询 (上下文生成失败): " .. question
+    end
+    
+    if state.llm_provider == "ollama" then
+        if not WebRequest or not WebRequest.custom then safe_broadcast("❌ WebRequest不可用 (Ollama)", {1,0,0}); return end
+        if not JSON then safe_broadcast("❌ JSON模块不可用 (Ollama)", {1,0,0}); return end
+        
+        local request_data = { model = state.ollama_model, prompt = full_context, stream = false }
+        local headers = { ["Content-Type"] = "application/json" }
+        local json_data = safe_json_encode(request_data)
+        if not json_data then safe_broadcast("❌ 无法编码Ollama请求数据", {1,0,0}); return end
+        
+        safe_print("发送Ollama请求 (上下文长度: " .. #full_context .. ")")
+        pcall(WebRequest.custom, state.ollama_url .. "/api/generate", "POST", true, json_data, headers, function(request)
+            if request.is_error then
+                safe_broadcast("❌ Ollama查询失败: " .. tostring(request.error), {1,0,0})
+            else
+                local data = safe_json_decode(request.text)
+                if data and data.response then
+                    state.success_count = (state.success_count or 0) + 1
+                    safe_broadcast("🤖 " .. data.response)
+                else
+                    safe_broadcast("❌ 无法解析Ollama回复。原始响应见日志。", {1,0.5,0})
+                    safe_print("原始Ollama响应: " .. request.text)
+                end
+            end
+        end)
+    elseif state.llm_provider == "gemini" then
+        send_gemini_request(state.gemini_key, state.gemini_model, full_context, player)
+    end
+end
+
+-- =====================================
+-- 🎯 命令处理系统 (函数定义必须在onChat之前)
+-- =====================================
+
+-- 解析tc命令
+local function parse_tc_command(message)
+    local parts = {}
+    local current_word = ""
+    if type(message) ~= "string" then return parts end
+    for i = 1, #message do
+        local char = message:sub(i, i)
+        if char == " " or char == "\t" then
+            if current_word ~= "" then table.insert(parts, current_word); current_word = "" end
+        else
+            current_word = current_word .. char
+        end
+    end
+    if current_word ~= "" then table.insert(parts, current_word) end
+    return parts
+end
+
+-- 显示帮助
+local function show_help(player)
+    local help_text = 
+"🎲 桌游伴侣使用指南 v" .. (VERSION or "未知") .. "\n\n"
+.. "基础命令:\n"
+.. "  tc help         - 显示此帮助\n"
+.. "  tc status       - 显示当前状态\n"
+.. "  tc test         - 测试当前配置的LLM连接 (" .. (state.llm_provider or "未配置") .. ")\n\n"
+.. "配置命令:\n"
+.. "  tc config ollama <URL> <模型> - 配置Ollama (例: tc config ollama http://localhost:11434 gemma2:9b)\n"
+.. "  tc config gemini <API_KEY> [模型] - 配置Gemini (模型可选, 默认 " .. (state.gemini_model or "gemini-pro") .. ")\n\n"
+.. "LLM提供商切换:\n"
+.. "  运行任一 'tc config ...' 命令即可切换并使用对应的LLM服务。\n"
+.. "  当前LLM提供商: " .. (state.llm_provider or "未配置") .. "\n\n"
+.. "上下文命令:\n"
+.. "  tc context refresh     - 手动刷新游戏上下文\n"
+.. "  tc context auto on/off - 切换自动上下文收集 (当前: " .. (state.auto_context and "开" or "关") .. ")\n"
+.. "  tc context show        - 显示当前收集的游戏状态摘要\n"
+.. "  tc context objects on/off - 切换是否包含对象信息 (当前: " .. (state.include_objects and "开" or "关") .. ")\n"
+.. "  tc context players on/off - 切换是否包含玩家信息 (当前: " .. (state.include_players and "开" or "关") .. ")\n"
+.. "  tc context zones on/off   - 切换是否包含区域信息 (当前: " .. (state.include_zones and "开" or "关") .. ")\n"
+.. "  tc context notebook on/off - 切换是否包含笔记信息 (当前: " .. (state.include_notebook and "开" or "关") .. ")\n\n"
+.. "规则命令:\n"
+.. "  tc rules load <粘贴的规则文本> - 加载游戏规则 (直接粘贴文本)\n"
+.. "  tc rules clear         - 清除已加载的规则\n"
+.. "  tc rules status        - 显示规则文档加载状态\n\n"
+.. "查询:\n"
+.. "  @tc <你的问题>      - 向当前LLM (" .. (state.llm_provider or "未配置") .. ") 提问 (会自动附加游戏上下文)\n\n"
+.. "示例:\n"
+.. "  tc config gemini YOUR_API_KEY_HERE\n"
+.. "  tc rules load 这是一个策略游戏...\n"
+.. "  @tc 我现在应该做什么？"
+
+    if player then
+        safe_print(string.format("show_help: Player object received. Color: %s, Type: %s, Has .print: %s", 
+            tostring(player.color), -- Ensure player.color is stringified
+            type(player), 
+            tostring(player.print ~= nil)))
+        safe_player_action(player, function(p) 
+            if p and p.print then 
+                p.print(help_text) 
+            else 
+                safe_print("show_help/action_func: p or p.print is nil. Cannot print help to player.")
+            end 
+        end, "显示帮助")
+    else
+        safe_print("show_help: Player object is nil. Broadcasting help to console/all.")
+        safe_broadcast("📖 帮助信息已输出到控制台日志。")
+        safe_print("================ 帮助信息 ================\n" .. help_text .. "\n========================================")
+    end
+end
+
+-- 显示状态
+local function show_status(player)
+    local status_text = ""
+    if state then
+        local rules_status = "未加载"
+        if state.rules_document and state.rules_document ~= "" then
+            rules_status = "已加载 (" .. #state.rules_document .. "字符)"
+        end
+
+        local llm_details = "未配置"
+        if state.llm_provider == "ollama" then
+            llm_details = "Ollama (URL: " .. (state.ollama_url or "未设置") .. ", 模型: " .. (state.ollama_model or "未选择") .. ")"
+        elseif state.llm_provider == "gemini" then
+            llm_details = "Gemini (模型: " .. (state.gemini_model or "未选择") .. ", API Key: " .. (state.gemini_key and "已设置" or "未设置") .. ")"
+        end
+
+        local notebook_status = state.include_notebook and "包含" or "排除"
+
+        status_text = 
+"🎲 桌游伴侣状态 v" .. (VERSION or "未知") .. "\n\n"
+.. "当前LLM提供商: " .. (state.llm_provider or "未配置") .. "\n"
+.. "  " .. llm_details .. "\n\n"
+.. "游戏状态:\n"
+.. "  当前游戏: " .. (state.current_game_name or "未知") .. "\n"
+.. "  规则文档: " .. rules_status .. "\n"
+.. "  自动上下文: " .. (state.auto_context and "启用" or "禁用") .. " (对象: " .. (state.include_objects and "包含" or "排除") .. ", 玩家: " .. (state.include_players and "包含" or "排除") .. ", 区域: " .. (state.include_zones and "包含" or "排除") .. ", 笔记: " .. notebook_status .. ")\n\n"
+.. "统计:\n"
+.. "  总查询次数: " .. tostring(state.query_count or 0) .. "\n"
+.. "  成功回复次数: " .. tostring(state.success_count or 0)
+    else
+        status_text = "错误：state表未初始化。"
+    end
+    
+    if player then
+        safe_print(string.format("show_status: Player object received. Color: %s, Type: %s, Has .print: %s", 
+            tostring(player.color), -- Ensure player.color is stringified
+            type(player), 
+            tostring(player.print ~= nil)))
+        safe_player_action(player, function(p) 
+            if p and p.print then
+                p.print(status_text) 
+            else
+                safe_print("show_status/action_func: p or p.print is nil. Cannot print status to player.")
+            end
+        end, "显示状态")
+    else
+        safe_print("show_status: Player object is nil. Broadcasting status to console/all.")
+        safe_broadcast("📊 系统状态已输出到控制台日志。")
+        safe_print("================ 系统状态 ================\n" .. status_text .. "\n========================================")
+    end
+end
+
+-- 处理配置命令
+local function handle_config_command(parts, player)
+    if not parts or #parts < 3 then
+        safe_player_action(player, function(p) p.print("用法: tc config <provider> [options...]") end)
+        return
+    end
+    local provider = parts[3]:lower()
+    if provider == "ollama" then
+        if #parts < 5 then
+            safe_player_action(player, function(p) p.print("用法: tc config ollama <URL> <模型>") end)
+            return
+        end
+        state.ollama_url = parts[4]
+        state.ollama_model = parts[5]
+        state.llm_provider = "ollama"
+        safe_broadcast("✅ Ollama已设为LLM提供商: " .. state.ollama_url .. " | " .. state.ollama_model)
+    elseif provider == "gemini" then
+        if #parts < 4 then
+            safe_player_action(player, function(p) p.print("用法: tc config gemini <API_KEY> [模型名称] (模型可选, 默认为 '" .. state.gemini_model .. "')") end)
+            return
+        end
+        state.gemini_key = parts[4]
+        if parts[5] and parts[5] ~= "" then 
+            state.gemini_model = parts[5]
+        else
+            state.gemini_model = "gemini-pro" -- 确保如果未提供模型，则使用默认值
+        end
+        state.llm_provider = "gemini"
+        safe_broadcast("✅ Gemini已设为LLM提供商 (模型: %s). API密钥已设置。", state.gemini_model)
+    else
+        safe_broadcast("❌ 不支持的提供商: " .. provider .. ". 目前支持 'ollama' 和 'gemini'。", nil, player) -- 向触发者广播
+    end
+    
+    safe_print(string.format("handle_config_command: LLM provider set to '%s'. UI minimized: %s. Refreshing UI.", state.llm_provider, tostring(state.ui_minimized)))
+
+    if UI and UI.setXml then
+        if not state.ui_minimized then
+            local ui_update_success, ui_err = pcall(create_ui) 
+            if not ui_update_success then 
+                safe_print("handle_config_command: create_ui 调用失败: " .. tostring(ui_err)) 
+            end
+        else -- UI is minimized
+            safe_print("handle_config_command: UI is minimized. Refreshing minimized UI.")
+            local min_ui_update_success, min_ui_err = pcall(create_minimized_ui)
+            if not min_ui_update_success then
+                safe_print("handle_config_command: create_minimized_ui 调用失败: " .. tostring(min_ui_err))
+            end
+        end
+    else
+        safe_print("handle_config_command: UI or UI.setXml not available, cannot refresh UI.")
+    end
+end
+
+-- 处理上下文相关命令
+local function handle_context_command(parts, player)
+    if not parts or #parts < 3 then
+        show_help(player) -- Show full help if subcommand is missing
+        return
+    end
+    local subcommand = parts[3]
+    if subcommand == "refresh" then
+        pcall(gather_game_context)
+        safe_broadcast("✅ 游戏上下文已刷新")
+    elseif subcommand == "auto" then
+        if parts[4] == "on" then state.auto_context = true
+        elseif parts[4] == "off" then state.auto_context = false
+        else state.auto_context = not state.auto_context end
+        safe_broadcast("✅ 自动上下文收集: " .. (state.auto_context and "已启用" or "已禁用"))
+    elseif subcommand == "show" then
+        local summary = generate_game_summary()
+        safe_player_action(player, function(p) p.print("=== 当前游戏状态 ===\n" .. summary) end)
+    elseif subcommand == "objects" then
+        if parts[4] == "on" then state.include_objects = true
+        elseif parts[4] == "off" then state.include_objects = false
+        else state.include_objects = not state.include_objects end
+        safe_broadcast("✅ 对象信息收集: " .. (state.include_objects and "已启用" or "已禁用"))
+    elseif subcommand == "players" then
+        if parts[4] == "on" then state.include_players = true
+        elseif parts[4] == "off" then state.include_players = false
+        else state.include_players = not state.include_players end
+        safe_broadcast("✅ 玩家信息收集: " .. (state.include_players and "已启用" or "已禁用"))
+    elseif subcommand == "zones" then
+        if parts[4] == "on" then state.include_zones = true
+        elseif parts[4] == "off" then state.include_zones = false
+        else state.include_zones = not state.include_zones end
+        safe_broadcast("✅ 区域信息收集: " .. (state.include_zones and "已启用" or "已禁用"))
+    elseif subcommand == "notebook" then
+        if parts[4] == "on" then state.include_notebook = true
+        elseif parts[4] == "off" then state.include_notebook = false
+        else state.include_notebook = not state.include_notebook end
+        safe_broadcast("✅ 笔记信息收集: " .. (state.include_notebook and "已启用" or "已禁用"))
+    else
+        safe_player_action(player, function(p) p.print("❌ 未知上下文子命令: " .. subcommand) end)
+    end
+    pcall(create_ui) -- Refresh UI as context settings might have changed
+end
+
+-- 处理规则相关命令
+local function handle_rules_command(parts, player)
+    if not parts or #parts < 3 then
+        show_help(player)
+        return
+    end
+    local subcommand = parts[3]
+    if subcommand == "load" then
+        local document_text_parts = {}
+        for i = 4, #parts do table.insert(document_text_parts, parts[i]) end
+        local document_text = table.concat(document_text_parts, " ")
+        
+        while #document_text > 0 and (document_text:sub(1,1) == " " or document_text:sub(1,1) == "\t") do
+            document_text = document_text:sub(2)
+        end
+        while #document_text > 0 and (document_text:sub(-1,-1) == " " or document_text:sub(-1,-1) == "\t") do
+            document_text = document_text:sub(1,-2)
+        end
+        if load_rules_document(document_text) then
+            pcall(create_ui) -- Refresh UI
+        end
+    elseif subcommand == "clear" then
+        clear_rules_document()
+        pcall(create_ui) -- Refresh UI
+    elseif subcommand == "status" then
+        local rules_status_msg = "规则文档状态: "
+        if state.rules_document and state.rules_document ~= "" then
+            rules_status_msg = rules_status_msg .. "已加载 (" .. #state.rules_document .. " 字符)"
+        else
+            rules_status_msg = rules_status_msg .. "未加载"
+        end
+        safe_player_action(player, function(p) p.print(rules_status_msg) end)
+    else
+        safe_player_action(player, function(p) p.print("❌ 未知规则子命令: " .. subcommand) end)
+    end
+end
+
+-- =====================================
+-- 🎨 用户界面（增强版）
+-- =====================================
+
+local function create_ui()
+    if not UI then safe_print("UI模块不可用，跳过UI创建"); return end
+    
+    safe_print("create_ui: Current LLM provider from state: " .. (state.llm_provider or "nil/未配置"))
+
+    local game_name_display = state.current_game_name or "未知"
+    if game_name_display == "" then game_name_display = "未知" end
+
+    local rules_doc_status = "未加载"
+    if state.rules_document and state.rules_document ~= "" then
+        rules_doc_status = "已加载 (" .. #state.rules_document .. "字)"
+    end
+    
+    local obj_count_display = "N/A"
+    if state.game_context and state.game_context.objects and state.game_context.objects.total_objects ~= nil then
+        obj_count_display = tostring(state.game_context.objects.total_objects)
+    end
+    local player_count_display = "N/A"
+    if state.game_context and state.game_context.game_info and state.game_context.game_info.player_count ~= nil then
+        player_count_display = tostring(state.game_context.game_info.player_count)
+    end
+
+    local llm_status_ui = "未配置"
+    if state.llm_provider == "ollama" then
+        llm_status_ui = "Ollama"
+    elseif state.llm_provider == "gemini" then
+        llm_status_ui = "Gemini"
+    end
+
+    local notebook_tab_count_display = "N/A"
+    if state.game_context and state.game_context.notebook and state.game_context.notebook.tabs then
+        notebook_tab_count_display = tostring(#state.game_context.notebook.tabs)
+    end
+
+    local panel_id_main = "MainPanel"
+    local stored_offset_main = state.ui_panel_offsets and state.ui_panel_offsets.main or "80 -10"
+    local final_offset_main = stored_offset_main
+
+    if UI.getAttribute then
+        local success_get_main, actual_offset_main = pcall(UI.getAttribute, panel_id_main, "offsetXY")
+        if success_get_main and actual_offset_main and type(actual_offset_main) == "string" and actual_offset_main ~= "" then
+            final_offset_main = actual_offset_main
+            if state.ui_panel_offsets then state.ui_panel_offsets.main = actual_offset_main end
+        end
+    end
+
+    local ui_xml = 
+'<Panel غورهAlignment="UpperLeft" offsetXY="' .. final_offset_main .. '" width="350" height="160" id="MainPanel" allowDragging="true" returnToOriginalPositionWhenReleased="false">\n'
+..'    <Panel color="#2D1B69E6" width="100%%" height="100%%" outline="#4C3A7B" outlineSize="2">\n'
+..'        <Text fontSize="16" color="#FFD700" alignment="MiddleCenter" offsetXY="0 65" fontStyle="Bold">\n'
+..'            🎲 桌游伴侣 v' .. (VERSION or "N/A") .. '\n'
+..'        </Text>\n'
+..'        <Text fontSize="10" color="#E6E6FA" alignment="MiddleCenter" offsetXY="0 50">\n'
+..'            智能游戏助手 - 上下文感知AI\n'
+..'        </Text>\n'
+..'        <Text fontSize="9" color="#B0C4DE" alignment="MiddleCenter" offsetXY="0 36">\n'
+..'            游戏: ' .. game_name_display .. ' | 规则: ' .. rules_doc_status .. '\n'
+..'        </Text>\n'
+..'        <Text fontSize="8" color="#98FB98" alignment="MiddleCenter" offsetXY="0 24">\n'
+..'            对象: ' .. obj_count_display .. ' | 玩家: ' .. player_count_display .. ' | LLM: ' .. llm_status_ui .. ' | 笔记页: ' .. notebook_tab_count_display .. '\n'
+..'        </Text>\n'
+..'        <Panel offsetXY="0 0" width="330" height="28" color="#3E2A8A80">\n'
+..'            <Button onClick="ui_show_help" width="70" height="22" offsetXY="-120 0" color="#6A5ACD" highlightColor="#7B68EE" tooltip="显示帮助信息">\n'
+..'                <Text fontSize="9" color="#FFFFFF" alignment="MiddleCenter">帮助</Text>\n'
+..'            </Button>\n'
+..'            <Button onClick="ui_show_status" width="70" height="22" offsetXY="-40 0" color="#6A5ACD" highlightColor="#7B68EE" tooltip="显示系统状态">\n'
+..'                <Text fontSize="9" color="#FFFFFF" alignment="MiddleCenter">状态</Text>\n'
+..'            </Button>\n'
+..'            <Button onClick="ui_refresh_context" width="70" height="22" offsetXY="40 0" color="#228B22" highlightColor="#32CD32" tooltip="刷新游戏上下文">\n'
+..'                <Text fontSize="9" color="#FFFFFF" alignment="MiddleCenter">刷新上下文</Text>\n'
+..'            </Button>\n'
+..'            <Button onClick="ui_minimize" width="70" height="22" offsetXY="120 0" color="#FF6347" highlightColor="#FF7F50" tooltip="最小化面板">\n'
+..'                <Text fontSize="9" color="#FFFFFF" alignment="MiddleCenter">最小化</Text>\n'
+..'            </Button>\n'
+..'        </Panel>\n'
+..'        <Panel offsetXY="0 -30" width="330" height="28" color="#3E2A8A80">\n'
+..'            <Button onClick="ui_toggle_auto_context" width="100" height="22" offsetXY="-105 0" color="#4682B4" highlightColor="#5F9EA0" tooltip="切换自动上下文收集">\n'
+..'                <Text fontSize="8" color="#FFFFFF" alignment="MiddleCenter">自动上下文: ' .. (state.auto_context and "开" or "关") .. '</Text>\n'
+..'            </Button>\n'
+..'            <Button onClick="ui_clear_rules" width="100" height="22" offsetXY="0 0" color="#DC143C" highlightColor="#F08080" tooltip="清除已加载的规则文档">\n'
+..'                <Text fontSize="8" color="#FFFFFF" alignment="MiddleCenter">清除规则</Text>\n'
+..'            </Button>\n'
+..'            <Button onClick="ui_test_connection" width="100" height="22" offsetXY="105 0" color="#FF8C00" highlightColor="#FFA500" tooltip="测试当前LLM连接">\n'
+..'                <Text fontSize="8" color="#FFFFFF" alignment="MiddleCenter">测试连接</Text>\n'
+..'            </Button>\n'
+..'        </Panel>\n'
+..'    </Panel>\n'
+..'</Panel>'
+    
+    local success, err = pcall(UI.setXml, ui_xml)
+    if not success then 
+        safe_print("UI创建失败: " .. tostring(err))
+    else
+        safe_print(string.format("UI.setXml successful for %s.", panel_id_main))
+        safe_print(string.format("Attempting to register offsetXY callback for %s. UI.setAttributeChanged type: %s", panel_id_main, type(UI.setAttributeChanged)))
+        if UI.setAttributeChanged and type(UI.setAttributeChanged) == 'function' then
+            safe_print("UI.setAttributeChanged function exists and is a function.")
+            if _G["ui_panel_offset_changed"] and type(_G["ui_panel_offset_changed"]) == 'function' then
+                safe_print("Callback function ui_panel_offset_changed exists globally and is a function.")
+                local reg_succ, reg_err = pcall(UI.setAttributeChanged, panel_id_main, "offsetXY", "ui_panel_offset_changed")
+                if not reg_succ then
+                    safe_print(string.format("pcall to UI.setAttributeChanged for %s failed: %s", panel_id_main, tostring(reg_err)))
+                else
+                    safe_print(string.format("UI.setAttributeChanged registration for %s completed. Success status from TTS: %s", panel_id_main, tostring(reg_err)))
+                end
+            else
+                safe_print(string.format("Callback function ui_panel_offset_changed NOT FOUND globally or not a function (type: %s).", type(_G["ui_panel_offset_changed"])))
+            end
+        else
+            safe_print(string.format("UI.setAttributeChanged function is NOT available or not a function for panel %s (type: %s). Skipping registration.", panel_id_main, type(UI.setAttributeChanged)))
+        end
+    end
+end
+
+local function create_minimized_ui()
+    if not UI then safe_print("UI模块不可用，跳过最小化UI创建"); return end
+
+    safe_print("create_minimized_ui: Current LLM provider from state: " .. (state.llm_provider or "nil/未配置"))
+
+    local panel_id_minimized = "MinimizedPanel"
+    local stored_offset_minimized = state.ui_panel_offsets and state.ui_panel_offsets.minimized or "80 -10"
+    local final_offset_minimized = stored_offset_minimized
+
+    if UI.getAttribute then
+        local success_get_minimized, actual_offset_minimized = pcall(UI.getAttribute, panel_id_minimized, "offsetXY")
+        if success_get_minimized and actual_offset_minimized and type(actual_offset_minimized) == "string" and actual_offset_minimized ~= "" then
+            final_offset_minimized = actual_offset_minimized
+            if state.ui_panel_offsets then state.ui_panel_offsets.minimized = actual_offset_minimized end
+        end
+    end
+
+    local ui_xml = 
+'<Panel rectAlignment="UpperLeft" offsetXY="' .. final_offset_minimized .. '" width="200" height="35" id="MinimizedPanel" allowDragging="true" returnToOriginalPositionWhenReleased="false">\n'
+..'    <Panel color="#2D1B69E6" width="100%%" height="100%%" outline="#4C3A7B" outlineSize="2">\n'
+..'        <Button onClick="ui_restore" width="190" height="28" color="#6A5ACD" highlightColor="#7B68EE" tooltip="还原完整面板">\n'
+..'            <Text fontSize="12" color="#FFD700" alignment="MiddleCenter" fontStyle="Bold">🎲 桌游伴侣 v' .. (VERSION or "N/A") .. ' ✨</Text>\n'
+..'        </Button>\n'
+..'    </Panel>\n'
+..'</Panel>'
+    local success, err = pcall(UI.setXml, ui_xml)
+    if not success then 
+        safe_print("最小化UI创建失败: " .. tostring(err))
+    else
+        safe_print(string.format("UI.setXml successful for %s.", panel_id_minimized))
+        safe_print(string.format("Attempting to register offsetXY callback for %s. UI.setAttributeChanged type: %s", panel_id_minimized, type(UI.setAttributeChanged)))
+        if UI.setAttributeChanged and type(UI.setAttributeChanged) == 'function' then
+            safe_print("UI.setAttributeChanged function exists and is a function for minimized UI.")
+            if _G["ui_panel_offset_changed"] and type(_G["ui_panel_offset_changed"]) == 'function' then
+                safe_print("Callback function ui_panel_offset_changed exists globally and is a function for minimized UI.")
+                local reg_succ, reg_err = pcall(UI.setAttributeChanged, panel_id_minimized, "offsetXY", "ui_panel_offset_changed")
+                if not reg_succ then
+                    safe_print(string.format("pcall to UI.setAttributeChanged for %s failed: %s", panel_id_minimized, tostring(reg_err)))
+                else
+                    safe_print(string.format("UI.setAttributeChanged registration for %s completed. Success status from TTS: %s", panel_id_minimized, tostring(reg_err)))
+                end
+            else
+                safe_print(string.format("Callback function ui_panel_offset_changed NOT FOUND globally or not a function for minimized UI (type: %s).", type(_G["ui_panel_offset_changed"])))
+            end
+        else
+            safe_print(string.format("UI.setAttributeChanged function is NOT available or not a function for panel %s (type: %s). Skipping registration.", panel_id_minimized, type(UI.setAttributeChanged)))
+        end
+    end
+end
+
+-- UI事件处理（增强版）
+function ui_show_help(player_who_clicked, value, id) -- 添加 player_who_clicked
+    safe_print("ui_show_help called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    if type(show_help) == "function" then
+        show_help(player_who_clicked) -- 传递 player_who_clicked
+    else
+        safe_print("错误: show_help 不是函数! (UI)")
+    end
+end
+
+function ui_show_status(player_who_clicked, value, id) -- 添加 player_who_clicked
+    safe_print("ui_show_status called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    if type(show_status) == "function" then
+        show_status(player_who_clicked) -- 传递 player_who_clicked
+    else
+        safe_print("错误: show_status 不是函数! (UI)")
+    end
+end
+
+function ui_refresh_context(player_who_clicked, value, id) -- 添加 player_who_clicked
+    safe_print("ui_refresh_context called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    pcall(gather_game_context)
+    safe_broadcast("✅ 游戏上下文已刷新", nil, player_who_clicked) -- 尝试定向广播
+    pcall(create_ui)
+end
+
+function ui_toggle_auto_context(player_who_clicked, value, id) -- 添加 player_who_clicked
+    safe_print("ui_toggle_auto_context called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    state.auto_context = not state.auto_context
+    safe_broadcast("✅ 自动上下文收集: " .. (state.auto_context and "已启用" or "已禁用"), nil, player_who_clicked)
+    pcall(create_ui)
+end
+
+function ui_clear_rules(player_who_clicked, value, id) -- 添加 player_who_clicked
+    safe_print("ui_clear_rules called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    clear_rules_document() -- clear_rules_document 内部调用 safe_broadcast (它需要更新以可能使用player_who_clicked)
+    pcall(create_ui)
+end
+
+function ui_test_connection(player_who_clicked, value, id) -- 添加 player_who_clicked
+    safe_print("ui_test_connection called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    if type(test_llm_connection) == "function" then
+        -- test_llm_connection 内部处理广播。如果它需要 player 对象来定向响应，
+        -- 那么 test_llm_connection 的签名和逻辑也需要修改以接受和使用 player_who_clicked。
+        -- 当前 test_llm_connection 不接受 player 参数，所以响应总是全局的。
+        test_llm_connection(effective_player) 
+    else
+        safe_print("错误: test_llm_connection 不是函数! (UI)")
+        safe_broadcast("❌ 内部错误: LLM测试功能异常。", {1,0,0}, player_who_clicked)
+    end
+end
+
+function ui_minimize(player_who_clicked, value, id) -- player_who_clicked可能为nil
+    safe_print("ui_minimize called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    state.ui_minimized = true
+    pcall(create_minimized_ui)
+end
+
+-- 新的回调函数，用于处理面板offsetXY属性变化 -- (Moved this function higher in the file, before ui_restore)
+-- function ui_panel_offset_changed(player_color, panel_id, new_offset_xy) ... end
+
+function ui_restore(player_who_clicked, value, id) -- player_who_clicked可能为nil
+    safe_print("ui_restore called by: " .. (player_who_clicked and player_who_clicked.color or "System/Unknown"))
+    -- 不再需要在这里尝试获取 MinimizedPanel 的 offsetXY，
+    -- 因为 ui_panel_offset_changed 应该已经更新了 state.ui_panel_offsets.minimized
+    state.ui_minimized = false
+    pcall(create_ui)
+end
+
+-- 新的回调函数，用于处理面板offsetXY属性变化
+function ui_panel_offset_changed(player_color, panel_id, new_offset_xy)
+    safe_print(string.format("[CALLBACK] ui_panel_offset_changed CALLED. Player: %s, Panel ID: %s, New Offset: %s", tostring(player_color), tostring(panel_id), tostring(new_offset_xy)))
+    if not panel_id or not new_offset_xy or type(new_offset_xy) ~= "string" or new_offset_xy == "" then
+        safe_print(string.format("ui_panel_offset_changed: Invalid arguments (panel_id: %s, offset: %s)", tostring(panel_id), tostring(new_offset_xy)))
+        return
+    end
+
+    if panel_id == "MainPanel" then
+        if state.ui_panel_offsets then state.ui_panel_offsets.main = new_offset_xy end
+        safe_print("MainPanel offset changed by user (drag): " .. new_offset_xy)
+    elseif panel_id == "MinimizedPanel" then
+        if state.ui_panel_offsets then state.ui_panel_offsets.minimized = new_offset_xy end
+        safe_print("MinimizedPanel offset changed by user (drag): " .. new_offset_xy)
+    else
+        safe_print("ui_panel_offset_changed: Unknown panel_id: " .. panel_id)
+    end
+end
+
+-- =====================================
+-- 🚀 初始化系统（增强版）
+-- =====================================
+
+function onLoad(saved_state_json)
+    safe_print("桌游伴侣初始化开始...")
+    if saved_state_json and saved_state_json ~= "" then
+        local decoded_success, data = pcall(safe_json_decode, saved_state_json)
+        if decoded_success and data then
+            state.llm_provider = data.llm_provider or "none"
+            state.ollama_url = data.ollama_url or "http://localhost:11434"
+            state.ollama_model = data.ollama_model or "gemma3:12b"
+            state.gemini_key = data.gemini_key or nil 
+            state.gemini_model = data.gemini_model or "gemini-pro" 
+            state.query_count = data.query_count or 0
+            state.success_count = data.success_count or 0
+            
+            local loaded_game_name = data.current_game_name or "未知游戏"
+            safe_print(string.format("onLoad: Loaded current_game_name from save: '%s'", tostring(loaded_game_name)))
+            if loaded_game_name == "未知游?" then
+                safe_print("onLoad: Correcting '未知游?' from saved state to '未知游戏'")
+                state.current_game_name = "未知游戏"
+            else
+                state.current_game_name = loaded_game_name
+            end
+            
+            state.rules_document = data.rules_document or ""
+            state.auto_context = data.auto_context == nil and true or data.auto_context 
+            state.include_objects = data.include_objects == nil and true or data.include_objects
+            state.include_players = data.include_players == nil and true or data.include_players
+            state.include_zones = data.include_zones == nil and true or data.include_zones
+            state.include_notebook = data.include_notebook == nil and true or data.include_notebook
+            state.ui_minimized = data.ui_minimized == nil and false or data.ui_minimized
+            state.ui_panel_offsets = data.ui_panel_offsets or { main = "80 -10", minimized = "80 -10" }
+            safe_print("配置已恢复")
+        else
+            safe_print("无法恢复保存的状态: " .. tostring(data)) 
+        end
+    else
+      -- Initialize new settings if no saved state
+      state.current_game_name = "未知游戏"
+      state.include_notebook = true 
+      state.ui_minimized = false
+      state.ui_panel_offsets = { main = "80 -10", minimized = "80 -10" }
+    end
+    
+    if state.auto_context then
+        local context_success_onLoad, context_err_onLoad = pcall(gather_game_context)
+        if not context_success_onLoad then safe_print("初始上下文收集失败 (onLoad): " .. tostring(context_err_onLoad)) end
+        else
+        if type(detect_game_name) == 'function' then 
+            local dn_succ, dn_val = pcall(detect_game_name) 
+            if dn_succ and dn_val and dn_val ~= "" then state.current_game_name = dn_val 
+            elseif not dn_succ then safe_print("onLoad detect_game_name error: "..tostring(dn_val)) end
+        end
+    end
+    
+    if not state.ui_minimized and UI and UI.setXml then 
+        local ui_success, ui_err = pcall(create_ui)
+        if not ui_success then safe_print("UI创建失败 (onLoad): "..tostring(ui_err)) end
+    elseif state.ui_minimized and UI and UI.setXml then 
+        local min_ui_succ, min_ui_err = pcall(create_minimized_ui)
+        if not min_ui_succ then safe_print("Minimized UI creation failed (onLoad): "..tostring(min_ui_err)) end
+    end
+    
+    -- REMOVING CONTEXT MENU FUNCTIONALITY
+    safe_print("右键菜单功能已在此版本中禁用 (onLoad)。")
+    -- if addContextMenuItem and type(addContextMenuItem) == 'function' then 
+    --     safe_print(string.format("setup_context_menus: Checking addContextMenuItem. Type: %s", type(addContextMenuItem)))
+    --     local cmenu_succ, cmenu_err = pcall(setup_context_menus)
+    --     if not cmenu_succ then safe_print("右键菜单设置失败 (onLoad): "..tostring(cmenu_err)) end
+    -- else 
+    --     safe_print(string.format("addContextMenuItem 函数不可用或类型不正确 (type: %s)，跳过右键菜单设置 (onLoad)。", type(addContextMenuItem)))
+    -- end
+    
+    state.ready = true
+    safe_print("桌游伴侣初始化完成 v" .. VERSION)
+    safe_broadcast("✅ 桌游伴侣已启动 v" .. VERSION .. " - 输入 'tc help' 查看帮助。")
+end
+
+function onSave()
+    local save_data = {
+        llm_provider = state.llm_provider, ollama_url = state.ollama_url,
+        ollama_model = state.ollama_model, query_count = state.query_count,
+        success_count = state.success_count, current_game_name = state.current_game_name,
+        rules_document = state.rules_document, auto_context = state.auto_context,
+        include_objects = state.include_objects, include_players = state.include_players,
+        include_zones = state.include_zones, include_notebook = state.include_notebook,
+        gemini_key = state.gemini_key, gemini_model = state.gemini_model,
+        ui_minimized = state.ui_minimized,
+        ui_panel_offsets = state.ui_panel_offsets
+    }
+    local json_data = safe_json_encode(save_data)
+    if json_data and json_data ~= "JSON_NOT_AVAILABLE" then
+        return json_data
+    else
+        safe_print("无法保存状态：JSON编码失败或模块不可用")
+        return "" -- Return empty string if saving fails
+    end
+end
+
+-- =====================================
+-- 🎯 高级功能与事件监听
+-- =====================================
+
+function onObjectDrop(player_color, dropped_object)
+    if state.auto_context and state.ready then
+        safe_print("检测到对象移动，计划刷新上下文...")
+        if Wait and Wait.time then
+            local delay_success = pcall(Wait.time, function()
+                safe_print("延迟刷新上下文 (onObjectDrop)")
+                local context_success = pcall(gather_game_context)
+                if context_success then if not state.ui_minimized then pcall(create_ui) end
+                else safe_print("上下文刷新失败 (onObjectDrop)") end
+            end, 0.5)
+            if not delay_success then pcall(gather_game_context) end -- Fallback
+        else
+            pcall(gather_game_context) -- Fallback if Wait not available
+        end
+    end
+end
+
+function onPlayerChangeColor(player_color)
+    if state.auto_context and state.ready then
+        safe_print("检测到玩家颜色变化，计划刷新上下文...")
+        if Wait and type(Wait.time) == 'function' then -- Check if Wait.time is a function
+            local delay_success = pcall(Wait.time, function()
+                safe_print("延迟刷新上下文 (onPlayerChangeColor)")
+                local context_success = pcall(gather_game_context)
+                if context_success then if not state.ui_minimized then pcall(create_ui) end
+                else safe_print("上下文刷新失败 (onPlayerChangeColor)") end
+            end, 1.0)
+            if not delay_success then pcall(gather_game_context) end
+        else
+            pcall(gather_game_context)
+        end
+    end
+end
+
+-- 安全的右键菜单设置
+--[[ 
+local function setup_context_menus()
+    if not addContextMenuItem then 
+        safe_print("setup_context_menus: addContextMenuItem API is not available. Skipping context menu setup.")
+        return 
+    end 
+    if type(addContextMenuItem) ~= 'function' then
+        safe_print(string.format("setup_context_menus: addContextMenuItem is not a function (type: %s). Skipping context menu setup.", type(addContextMenuItem)))
+        return
+    end
+
+    safe_print(string.format("setup_context_menus: Checking addContextMenuItem. Type: %s", type(addContextMenuItem)))
+
+    local menu_items = {
+        {label = "桌游伴侣 - 分析当前局势", func = function(player_color_str) -- param changed to player_color_str for clarity
+            local cmd_player = nil
+            if Player and player_color_str and Player[player_color_str] and type(Player[player_color_str]) == 'userdata' then
+                cmd_player = Player[player_color_str]
+            else
+                safe_print("Context menu: Could not get valid player object for color: " .. tostring(player_color_str))
+            end
+
+            if state.llm_provider == "none" then 
+                safe_broadcast("❌ 请先配置LLM", {1,0,0}, cmd_player) 
+                return 
+            end
+            pcall(gather_game_context) -- ensure context is fresh
+            if type(query_llm) == "function" then
+                query_llm("请分析当前游戏局势，给出策略建议", cmd_player) -- cmd_player might be nil here, query_llm should handle
+            else 
+                safe_print("query_llm 不是函数 (右键菜单 - 分析)") 
+                safe_broadcast("内部错误: 分析功能异常", {1,0,0}, cmd_player)
+            end
+        end},
+        {label = "桌游伴侣 - 解释游戏规则", func = function(player_color_str) -- param changed to player_color_str
+            local cmd_player = nil
+            if Player and player_color_str and Player[player_color_str] and type(Player[player_color_str]) == 'userdata' then
+                cmd_player = Player[player_color_str]
+            else
+                safe_print("Context menu: Could not get valid player object for color: " .. tostring(player_color_str))
+            end
+
+            if state.llm_provider == "none" then 
+                safe_broadcast("❌ 请先配置LLM", {1,0,0}, cmd_player) 
+                return 
+            end
+            if type(query_llm) == "function" then
+                query_llm("请解释这个游戏的基本规则和玩法", cmd_player) -- cmd_player might be nil
+            else 
+                safe_print("query_llm 不是函数 (右键菜单 - 规则)") 
+                safe_broadcast("内部错误: 规则解释功能异常", {1,0,0}, cmd_player)
+            end
+        end}
+    }
+    local all_success = true
+    for _, item in ipairs(menu_items) do
+        local success, err_msg = pcall(addContextMenuItem, item.label, item.func)
+        if not success then 
+            all_success = false 
+            safe_print(string.format("setup_context_menus: Failed to add menu item '%s'. Error: %s", item.label, tostring(err_msg)))
+        end
+    end
+    if all_success then safe_print("右键菜单设置成功") else safe_print("右键菜单设置部分失败") end
+end 
+--]] -- End of REMOVING setup_context_menus function definition
+
+-- =====================================
+-- 💬 聊天消息处理（增强版）
+-- =====================================
+
+function onChat(message, player_object_raw) -- Renamed parameter to player_object_raw
+    safe_print("[onChat START] Raw Message: '" .. tostring(message) .. "' (type: " .. type(message) .. "), Raw PlayerParam: " .. tostring(player_object_raw) .. " (type: " .. type(player_object_raw) .. ")")
+    if not state.ready then 
+        safe_print("[onChat] State not ready. Aborting.")
+        return true 
+    end
+    if not message or message == "" then 
+        safe_print("[onChat] Empty message. Aborting.")
+        return true 
+    end
+    
+    local actual_player_object = nil
+    local source_player_color_str = "System/Unknown"
+
+    if player_object_raw and type(player_object_raw) == 'userdata' then
+        -- Assume player_object_raw is the actual player object
+        actual_player_object = player_object_raw
+        if actual_player_object.color and type(actual_player_object.color) == 'string' then
+            source_player_color_str = actual_player_object.color
+        else
+            safe_print("[onChat] Received player_object (userdata) but .color property is missing or not a string (type: " .. type(actual_player_object.color) .. "). Using default color string.")
+            source_player_color_str = "Player_" .. tostring(player_object_raw) -- Fallback color string
+        end
+        safe_print("[onChat] actual_player_object IS the raw parameter. Deduced Color Str: '" .. source_player_color_str .. "'. Has .print: " .. tostring(actual_player_object and actual_player_object.print ~= nil))
+    else
+        safe_print(string.format("[onChat] Raw player parameter is not a direct userdata player object (type: %s). Will use fallback.", type(player_object_raw)))
+    end
+
+    local effective_player = actual_player_object
+    if not effective_player or not effective_player.print then -- Also check .print for the direct object
+        if effective_player and not effective_player.print then
+            safe_print("[onChat] actual_player_object (from raw param) lacks .print method. Using fallback.")
+        elseif not effective_player then
+             safe_print("[onChat] actual_player_object is nil (raw param was not a valid player object). Using fallback.")
+        end
+        
+        effective_player = { 
+            print = function(msg_to_print) safe_print("[FallbackPlayer (color: " .. source_player_color_str .. ")]: " .. tostring(msg_to_print)) end,
+            color = source_player_color_str 
+        }
+        safe_print("[onChat] Fallback player created. Color: " .. effective_player.color)
+    else
+        safe_print("[onChat] Using actual player object from raw parameter. Color: " .. tostring(effective_player.color) .. ", Has .print: " .. tostring(effective_player.print ~= nil))
+    end
+    safe_print("[onChat END effective_player setup] Color: " .. tostring(effective_player.color) .. ", Has .print: " .. tostring(effective_player.print ~= nil))
+
+    local command_success, result = pcall(function()
+        if starts_with(message, "tc ") then
+            local parts = parse_tc_command(message)
+            if parts[1] == "tc" then
+                if parts[2] == "help" then
+                    show_help(effective_player)
+                elseif parts[2] == "status" then
+                    show_status(effective_player)
+                elseif parts[2] == "test" then
+                    test_llm_connection(effective_player)
+                elseif parts[2] == "config" then
+                    handle_config_command(parts, effective_player)
+                elseif parts[2] == "context" then
+                    handle_context_command(parts, effective_player)
+                elseif parts[2] == "rules" then
+                    handle_rules_command(parts, effective_player)
+                elseif parts[2] == "query" then
+                    query_llm(parts[3], effective_player)
+                else
+                    safe_player_action(effective_player, function(p) p.print("❌ 未知命令: " .. parts[2]) end)
+                end
+            end
+        end
+    end)
+
+    if not command_success then
+        safe_print("onChat: Error processing command: " .. tostring(result))
+        safe_player_action(effective_player, function(p) p.print("❌ 命令处理失败: " .. tostring(result)) end)
+    end
+
+    return true
+end 
