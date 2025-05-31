@@ -108,6 +108,13 @@ class LangchainManager:
             try:
                 from langchain_google_genai import GoogleGenerativeAIEmbeddings
                 model = cfg.EMBEDDING_MODEL if cfg.EMBEDDING_MODEL else cfg.GEMINI_EMBEDDING_MODEL
+                
+                # 处理模型名称格式，确保兼容性
+                # 兼容两种格式: "models/embedding-001" 和 "embedding-001"
+                if not model.startswith("models/") and not ":" in model:
+                    if model == "embedding-001":
+                        model = "models/embedding-001"
+                
                 embeddings = GoogleGenerativeAIEmbeddings(
                     model=model,
                     google_api_key=cfg.GEMINI_API_KEY,
