@@ -33,6 +33,7 @@ logs/
 # 项目生成的数据文件
 TTSAssistantServer/data/cache/vector_stores/
 TTSAssistantServer/data/processed_mods.json
+TTSAssistantServer/data/cache/editable_rulebook_texts/
 
 # IDE相关
 .idea/
