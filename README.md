@@ -145,4 +145,6 @@ python -m unittest discover tests
 
 ## 许可证
 
-[待定] 
+本项目采用 MIT 许可证，允许任何人免费使用、修改、分发和商用，无需署名。
+
+详细内容请参见 [LICENSE](./LICENSE) 文件。 
