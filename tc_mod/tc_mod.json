@@ -1,0 +1,50 @@
+{
+  "SaveName": "TabletopSimulatorCompanion",
+  "GameMode": "00000000-0000-0000-0000-000000000000",
+  "Date": "5/31/2025",
+  "Table": "Table_None",
+  "Sky": "Sky_Night",
+  "Note": "TabletopSimulatorCompanion (TTS Companion) 是一个基于LLM的规则解释助手。\n使用 @tc <问题> 提问规则相关问题。\n使用 tc help 获取帮助。",
+  "Rules": "",
+  "XmlUI": "",
+  "LuaScript": "",
+  "LuaScriptState": "",
+  "ObjectStates": [
+    {
+      "Name": "TTS Companion",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 5.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 180.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Nickname": "TTS Companion",
+      "Description": "LLM规则助手",
+      "ColorDiffuse": {
+        "r": 0.5,
+        "g": 0.5,
+        "b": 1.0
+      },
+      "Locked": true,
+      "Grid": true,
+      "Snap": true,
+      "IgnoreFoW": false,
+      "Autoraise": true,
+      "Sticky": true,
+      "Tooltip": true,
+      "GridProjection": false,
+      "HideWhenFaceDown": false,
+      "Hands": false,
+      "LuaScript": "#include tc_mod.lua",
+      "LuaScriptState": "",
+      "GUID": "123456"
+    }
+  ],
+  "TabStates": {},
+  "VersionNumber": "0.3.4"
+} 
