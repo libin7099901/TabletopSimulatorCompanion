@@ -5,7 +5,7 @@
 TabletopSimulatorCompanion (TTS Companion) - 服务端入口
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import os
 import json
 from services.workshop_manager import WorkshopManager
@@ -15,6 +15,7 @@ import config as cfg
 app = Flask(__name__)
 workshop_manager = WorkshopManager()
 langchain_manager = LangchainManager()
+app.json.ensure_ascii = False
 
 @app.route('/ask', methods=['POST'])
 def ask():
@@ -29,6 +30,10 @@ def ask():
         return jsonify({"error": "缺少必要参数"}), 400
     
     answer = langchain_manager.get_answer(question, game_name, player_id)
+    # import json as std_json
+    # manual_json_string = std_json.dumps(answer, ensure_ascii=False)
+    # print(f"9. Manual JSON string with std_json.dumps(ensure_ascii=False) (repr): {repr(manual_json_string)}")
+    # return Response(manual_json_string, mimetype='application/json; charset=utf-8')
     return jsonify({"answer": answer, "player_id": player_id})
 
 @app.route('/rulebook', methods=['GET'])
