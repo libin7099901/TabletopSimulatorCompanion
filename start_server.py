@@ -10,6 +10,7 @@ import sys
 import subprocess
 import signal
 import time
+import re
 from pathlib import Path
 
 def find_python_executable():
@@ -59,6 +60,60 @@ def check_requirements():
                 return False
         else:
             return False
+
+def check_and_kill_existing_server():
+    """检查并关闭已存在的服务进程"""
+    print("检查是否有已运行的 TTS Companion 服务...")
+    server_path = os.path.join('TTSAssistantServer', 'app.py').replace('\\', '\\\\')
+    killed = False
+    
+    if sys.platform == 'win32':
+        # Windows 使用 tasklist 和 findstr 命令
+        try:
+            # 获取所有Python进程
+            output = subprocess.check_output('tasklist /FI "IMAGENAME eq python.exe" /V /FO CSV', 
+                                            shell=True, text=True)
+            # 在输出中查找运行app.py的进程
+            for line in output.splitlines():
+                if 'app.py' in line:
+                    # 从CSV格式输出中提取PID
+                    match = re.search(r'"python\.exe","(\d+)"', line)
+                    if match:
+                        pid = match.group(1)
+                        print(f"发现运行中的TTS Companion服务 (PID: {pid})，正在关闭...")
+                        subprocess.run(f'taskkill /F /T /PID {pid}', shell=True, 
+                                      capture_output=True)
+                        killed = True
+                        # 等待进程完全终止
+                        time.sleep(1)
+        except subprocess.CalledProcessError:
+            print("检查运行中的服务时出错")
+    else:
+        # Linux/Mac 使用 ps 和 grep 命令
+        try:
+            # 获取所有包含app.py的Python进程
+            cmd = f"ps -ef | grep '[p]ython.*{server_path}' | awk '{{print $2}}'"
+            output = subprocess.check_output(cmd, shell=True, text=True)
+            
+            # 如果找到进程，关闭它
+            if output.strip():
+                for pid in output.splitlines():
+                    if pid.strip():
+                        pid = pid.strip()
+                        print(f"发现运行中的TTS Companion服务 (PID: {pid})，正在关闭...")
+                        os.kill(int(pid), signal.SIGTERM)
+                        killed = True
+                        # 等待进程完全终止
+                        time.sleep(1)
+        except subprocess.CalledProcessError:
+            print("检查运行中的服务时出错")
+    
+    if killed:
+        print("已关闭之前运行的TTS Companion服务")
+    else:
+        print("未发现正在运行的TTS Companion服务")
+    
+    return killed
 
 def start_server():
     """启动服务器"""
@@ -116,6 +171,9 @@ def main():
     if not check_requirements():
         print("缺少必要依赖，请安装后再试")
         return
+    
+    # 检查并关闭已存在的服务
+    check_and_kill_existing_server()
     
     # 启动服务器
     server_process = start_server()
