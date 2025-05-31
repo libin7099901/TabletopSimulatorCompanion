@@ -24,7 +24,7 @@ class ChatMessageHistory(BaseChatMessageHistory):
     """管理对话历史的简单实现"""
     
     def __init__(self):
-        self.messages = []
+        self.messages: list[BaseMessage] = []
     
     def add_user_message(self, message: str) -> None:
         """添加用户消息"""
@@ -33,6 +33,14 @@ class ChatMessageHistory(BaseChatMessageHistory):
     def add_ai_message(self, message: str) -> None:
         """添加AI消息"""
         self.messages.append(AIMessage(content=message))
+
+    def add_message(self, message: BaseMessage) -> None:
+        """添加单个消息对象 (兼容Langchain)"""
+        self.messages.append(message)
+
+    def add_messages(self, messages: list[BaseMessage]) -> None:
+        """添加多个消息对象列表 (兼容Langchain)"""
+        self.messages.extend(messages)
     
     def clear(self) -> None:
         """清空对话历史"""
@@ -76,9 +84,13 @@ class LangchainManager:
         elif cfg.LLM_PROVIDER == "ollama":
             try:
                 from langchain_community.llms import Ollama
+                base_url = cfg.OLLAMA_BASE_URL
+                if base_url == "http://localhost:11434":
+                    base_url = "http://127.0.0.1:11434"
+                    print(f"Ollama LLM: Changed base_url to {base_url} to avoid localhost resolution issues.")
                 llm = Ollama(
                     model=cfg.OLLAMA_MODEL,
-                    base_url=cfg.OLLAMA_BASE_URL,
+                    base_url=base_url,
                 )
                 return llm
             except ImportError:
@@ -107,16 +119,33 @@ class LangchainManager:
         if embedding_provider == "gemini":
             try:
                 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-                model = cfg.EMBEDDING_MODEL if cfg.EMBEDDING_MODEL else cfg.GEMINI_EMBEDDING_MODEL
+                # 优先使用 cfg.EMBEDDING_MODEL (来自.env或全局配置)
+                # 否则回退到 cfg.GEMINI_EMBEDDING_MODEL (通常是测试或代码内定义的默认值)
+                model_name_to_use = cfg.EMBEDDING_MODEL if cfg.EMBEDDING_MODEL else cfg.GEMINI_EMBEDDING_MODEL
+
+                # 确保 Gemini embedding 模型名称格式正确 (e.g., "models/embedding-001")
+                # 已知的 Gemini embedding 模型短名称列表 (可以根据需要扩展)
+                known_gemini_short_models = ["embedding-001", "text-embedding-004"] 
                 
-                # 处理模型名称格式，确保兼容性
-                # 兼容两种格式: "models/embedding-001" 和 "embedding-001"
-                if not model.startswith("models/") and not ":" in model:
-                    if model == "embedding-001":
-                        model = "models/embedding-001"
+                # 移除任何已有的 "models/" 前缀，以避免重复添加
+                if model_name_to_use.startswith("models/"):
+                    model_name_to_use = model_name_to_use.split("models/", 1)[-1]
+
+                if model_name_to_use in known_gemini_short_models:
+                    final_model_name = f"models/{model_name_to_use}"
+                elif ":" in model_name_to_use: # 如果包含冒号，认为是Ollama风格或其他特殊格式，不修改
+                    final_model_name = model_name_to_use
+                    print(f"Warning: Gemini embedding model '{model_name_to_use}' contains ':', using as-is. This might be an Ollama model name mistakenly used for Gemini.")
+                else: # 如果不是已知短名称，也不是特殊格式，并且没有 models/ 前缀，则添加
+                    if not model_name_to_use.startswith("models/"):
+                         final_model_name = f"models/{model_name_to_use}" # 尝试添加，但可能仍不正确如果不是Gemini模型
+                         print(f"Warning: Gemini embedding model '{model_name_to_use}' was not a known short name and did not start with 'models/'. Prepended 'models/'. Ensure this is a valid Gemini model name.")
+                    else:
+                        final_model_name = model_name_to_use # 已经有 models/ 前缀
                 
+                print(f"Gemini Embeddings: Using model name: {final_model_name}")
                 embeddings = GoogleGenerativeAIEmbeddings(
-                    model=model,
+                    model=final_model_name,
                     google_api_key=cfg.GEMINI_API_KEY,
                 )
                 return embeddings
@@ -127,9 +156,13 @@ class LangchainManager:
             try:
                 from langchain_community.embeddings import OllamaEmbeddings
                 model = cfg.EMBEDDING_MODEL if cfg.EMBEDDING_MODEL else cfg.OLLAMA_MODEL
+                base_url = cfg.OLLAMA_BASE_URL
+                if base_url == "http://localhost:11434":
+                    base_url = "http://127.0.0.1:11434"
+                    print(f"Ollama Embeddings: Changed base_url to {base_url} to avoid localhost resolution issues.")
                 embeddings = OllamaEmbeddings(
                     model=model,
-                    base_url=cfg.OLLAMA_BASE_URL,
+                    base_url=base_url,
                 )
                 return embeddings
             except ImportError:
