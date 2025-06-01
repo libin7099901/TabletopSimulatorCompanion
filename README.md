@@ -118,8 +118,17 @@ python app.py
 1. 启动服务端，自动扫描TTS数据并创建规则书缓存文件
 2. 在游戏中使用`tc rulebook list`查看可用规则书
 3. 找到对应的`.md`文件，使用文本编辑器填充规则内容
+   - 规则书的`.md`文件位于 `TTSAssistantServer/data/cache/editable_rulebook_texts/` 目录下，以游戏名（经过处理）为子目录。例如，若游戏名为 `Gizmos`，则规则书文件路径类似于：
+     
+     `data/cache/editable_rulebook_texts/gizmos/rulebook_xxx.md`
+   - 可通过 `tc rulebook list` 命令获取规则书的编号和文件名，便于定位。
 4. 使用`tc rulebook refresh_cache`命令更新RAG索引
 5. 使用`@tc`命令提问规则相关问题
+
+#### 如何在TTS中查找规则书的URL
+- 在TTS中加载目标游戏后，**右键点击桌面上的PDF规则手册对象，选择“自定义”弹出的窗口中可以直接看到该PDF文档的URL**。
+- 你也可以在TTS的Mod文件（如Workshop的json文件）中查找`Custom_PDF`对象，其`PDFUrl`、`FileURL`或`URL`字段即为规则书的链接。
+- 通过这些URL可以确认规则书的来源，或用于手动下载和整理规则内容。
 
 ## API接口
 
