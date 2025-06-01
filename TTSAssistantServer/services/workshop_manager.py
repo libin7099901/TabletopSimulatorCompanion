@@ -84,6 +84,10 @@ class WorkshopManager:
                 print(f"警告: WorkshopFileInfos.json 中的项目缺少名称或目录: {item}")
                 continue
             
+            # 清理 game_name
+            if isinstance(game_name, str):
+                game_name = game_name.strip()
+            
             # 确保路径是绝对的并且使用正确的系统分隔符
             # "Directory" 键中的路径可能已经是绝对的，并且可能包含混合的分隔符
             if not os.path.isabs(game_json_path):
@@ -188,6 +192,10 @@ class WorkshopManager:
                 
                 if not game_name:
                     continue
+                
+                # 清理 game_name
+                if isinstance(game_name, str):
+                    game_name = game_name.strip()
                 
                 print(f"  扫描文件: {json_file} (游戏名: {game_name})")
                 # 对于Saves目录的扫描，我们可能需要不同的逻辑来查找规则书

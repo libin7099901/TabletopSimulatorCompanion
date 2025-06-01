@@ -29,6 +29,10 @@ def ask():
     if not all([question, game_name, player_id]):
         return jsonify({"error": "缺少必要参数"}), 400
     
+    # 清理 game_name
+    if isinstance(game_name, str):
+        game_name = game_name.strip()
+
     answer = langchain_manager.get_answer(question, game_name, player_id)
     # import json as std_json
     # manual_json_string = std_json.dumps(answer, ensure_ascii=False)
@@ -43,6 +47,10 @@ def get_rulebooks():
     if not game_name:
         return jsonify({"error": "缺少游戏名称"}), 400
     
+    # 清理 game_name
+    if isinstance(game_name, str):
+        game_name = game_name.strip()
+
     rulebooks = workshop_manager.get_game_rulebook_info(game_name)
     return jsonify({"rulebooks": rulebooks})
 
@@ -57,6 +65,10 @@ def reset_session():
     if not game_name:
         return jsonify({"error": "缺少游戏名称"}), 400
     
+    # 清理 game_name
+    if isinstance(game_name, str):
+        game_name = game_name.strip()
+
     if player_id:
         langchain_manager.reset_conversation(game_name, player_id)
         return jsonify({"status": "success", "message": f"已重置玩家 {player_id} 在 {game_name} 的会话"})
@@ -72,27 +84,58 @@ def game_loaded():
     
     if not game_name:
         return jsonify({"error": "缺少游戏名称"}), 400
+
+    # 清理 game_name
+    cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
     
-    # 检查是否有可自动加载的规则书
-    rulebook_info = workshop_manager.check_auto_load_rulebook(game_name)
-    auto_rag_loaded = False
+    auto_rag_processed_from_md = False
     
-    if rulebook_info and os.path.exists(rulebook_info['editable_text_path']):
-        # 检查文件是否非空
-        file_size = os.path.getsize(rulebook_info['editable_text_path'])
-        if file_size > 0:  # 如果文件非空，加载RAG索引
-            langchain_manager.add_rulebook_text(rulebook_info['editable_text_path'], game_name)
-            workshop_manager.update_rulebook_status(game_name, rulebook_info['pdf_identifier_key'], "processed_into_rag")
-            auto_rag_loaded = True
+    # 1. 检查是否有单个规则书 .md 文件可以自动处理成RAG索引
+    rulebook_info_for_md_processing = workshop_manager.check_auto_load_rulebook(cleaned_game_name)
     
-    # 如果之前未发现该游戏的规则书引用，创建默认条目
-    if not workshop_manager.has_game(game_name):
-        workshop_manager.create_default_rulebook_entry(game_name)
+    if rulebook_info_for_md_processing and os.path.exists(rulebook_info_for_md_processing['editable_text_path']):
+        file_size = os.path.getsize(rulebook_info_for_md_processing['editable_text_path'])
+        # 假设模板内容小于100字节 (或者可以检查是否与预定义模板完全相同)
+        if file_size > 100: 
+            try:
+                print(f"Game loaded: Found rulebook .md for '{cleaned_game_name}', attempting to process into RAG.")
+                langchain_manager.add_rulebook_text(
+                    rulebook_info_for_md_processing['editable_text_path'], 
+                    cleaned_game_name
+                )
+                # 更新 WorkshopManager 中的状态
+                pdf_key = rulebook_info_for_md_processing.get('pdf_identifier_key') or \
+                          workshop_manager.get_identifier_key_by_path(
+                              cleaned_game_name, 
+                              rulebook_info_for_md_processing['editable_text_path']
+                          )
+                if pdf_key:
+                     workshop_manager.update_rulebook_status(
+                         cleaned_game_name, 
+                         pdf_key, 
+                         "processed_into_rag"
+                     )
+                auto_rag_processed_from_md = True
+                print(f"Game loaded: Successfully processed .md into RAG for '{cleaned_game_name}'.")
+            except Exception as e:
+                print(f"Game loaded: Error processing .md into RAG for '{cleaned_game_name}': {e}")
+        else:
+            print(f"Game loaded: Rulebook .md for '{cleaned_game_name}' found but is empty or only template, skipping RAG processing.")
+    
+    # 2. 无论 .md 文件是否被处理，都尝试从磁盘加载已存在的RAG索引
+    retriever_loaded = langchain_manager.load_or_get_retriever(cleaned_game_name)
+    
+    final_auto_rag_loaded_status = auto_rag_processed_from_md or (retriever_loaded is not None)
+
+    # 3. 如果游戏首次加载且 WorkshopManager 中没有记录，创建默认条目
+    if not workshop_manager.has_game(cleaned_game_name):
+        print(f"Game loaded: First time loading '{cleaned_game_name}', creating default rulebook entry.")
+        workshop_manager.create_default_rulebook_entry(cleaned_game_name)
     
     return jsonify({
         "status": "success", 
-        "message": f"游戏 {game_name} 已加载", 
-        "auto_rag_loaded": auto_rag_loaded
+        "message": f"游戏 {cleaned_game_name} 已加载", 
+        "auto_rag_loaded": final_auto_rag_loaded_status
     })
 
 @app.route('/api/rulebook/refresh_rag_from_cache', methods=['POST'])
@@ -105,6 +148,10 @@ def refresh_rag_from_cache():
     if not all([game_name, identifier]):
         return jsonify({"error": "缺少必要参数"}), 400
     
+    # 清理 game_name
+    if isinstance(game_name, str):
+        game_name = game_name.strip()
+
     rulebook_path = workshop_manager.resolve_rulebook_path(game_name, identifier)
     if not rulebook_path:
         return jsonify({"error": f"找不到匹配的规则书: {identifier}"}), 404

@@ -8,8 +8,10 @@ TabletopSimulatorCompanion (TTS Companion) - Langchain管理器
 
 import os
 import sys
+import re
 from typing import Dict, Any, Optional
 import config as cfg
+import shutil
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -18,6 +20,7 @@ from langchain.memory import ConversationBufferWindowMemory
 from langchain.schema import BaseChatMessageHistory
 from langchain.schema.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_community.document_loaders import TextLoader
+from langchain.prompts import PromptTemplate
 
 # 对话历史管理类
 class ChatMessageHistory(BaseChatMessageHistory):
@@ -194,8 +197,49 @@ class LangchainManager:
         else:
             raise ValueError(f"不支持的Embedding提供商: {embedding_provider}")
     
+    def load_or_get_retriever(self, game_name: str) -> Optional[Any]:
+        """
+        获取内存中的RAG检索器，如果不存在则尝试从磁盘加载。
+        Args:
+            game_name: 游戏名称 (可能需要内部清理)。
+        Returns:
+            Langchain Retriever 对象或 None (如果无法加载)。
+        """
+        cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
+
+        if cleaned_game_name in self.game_retrievers:
+            print(f"Retriever for '{cleaned_game_name}' found in memory.")
+            return self.game_retrievers[cleaned_game_name]
+        
+        vector_store_path = os.path.join(cfg.VECTOR_STORE_DIRECTORY, f"{cleaned_game_name}")
+        if os.path.exists(vector_store_path):
+            try:
+                print(f"Attempting to load retriever for '{cleaned_game_name}' from disk: {vector_store_path}")
+                vector_store = FAISS.load_local(
+                    vector_store_path, 
+                    self.embeddings, 
+                    allow_dangerous_deserialization=True
+                )
+                retriever = vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 5}
+                )
+                self.game_retrievers[cleaned_game_name] = retriever
+                print(f"Successfully loaded retriever for '{cleaned_game_name}' from disk.")
+                return retriever
+            except Exception as e:
+                print(f"警告: 为游戏 '{cleaned_game_name}' 从磁盘加载RAG索引失败: {e}")
+                return None
+        else:
+            print(f"No pre-built RAG index found on disk for game '{cleaned_game_name}' at {vector_store_path}")
+            return None
+
     def add_rulebook_text(self, file_path: str, game_name: str):
         """从文件加载规则书文本并构建RAG索引"""
+        
+        # 确保 game_name 用于路径时是干净的
+        cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
+
         # 加载文本
         loader = TextLoader(file_path, encoding='utf-8')
         documents = loader.load()
@@ -209,7 +253,7 @@ class LangchainManager:
         splits = text_splitter.split_documents(documents)
         
         # 创建向量存储
-        vector_store_path = os.path.join(cfg.VECTOR_STORE_DIRECTORY, f"{game_name}")
+        vector_store_path = os.path.join(cfg.VECTOR_STORE_DIRECTORY, f"{cleaned_game_name}")
         os.makedirs(vector_store_path, exist_ok=True)
         
         # 创建或更新FAISS索引
@@ -222,21 +266,22 @@ class LangchainManager:
         vector_store.save_local(vector_store_path)
         
         # 更新游戏检索器
-        self.game_retrievers[game_name] = vector_store.as_retriever(
+        self.game_retrievers[cleaned_game_name] = vector_store.as_retriever(
             search_type="similarity",
             search_kwargs={"k": 5}
         )
         
-        print(f"已为游戏 '{game_name}' 创建/更新RAG索引")
+        print(f"已为游戏 '{cleaned_game_name}' 创建/更新RAG索引")
     
     def _get_or_create_memory(self, game_name: str, player_id: str) -> ConversationBufferWindowMemory:
         """获取或创建玩家的对话记忆"""
+        cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
         # 如果游戏会话不存在，创建一个
-        if game_name not in self.game_sessions:
-            self.game_sessions[game_name] = {}
+        if cleaned_game_name not in self.game_sessions:
+            self.game_sessions[cleaned_game_name] = {}
         
         # 如果玩家会话不存在，创建一个
-        if player_id not in self.game_sessions[game_name]:
+        if player_id not in self.game_sessions[cleaned_game_name]:
             message_history = ChatMessageHistory()
             # 使用新版本的API创建记忆对象
             memory = ConversationBufferWindowMemory(
@@ -245,63 +290,90 @@ class LangchainManager:
                 memory_key="chat_history",
                 k=5  # 保留最近5轮对话
             )
-            self.game_sessions[game_name][player_id] = memory
+            self.game_sessions[cleaned_game_name][player_id] = memory
         
-        return self.game_sessions[game_name][player_id]
+        return self.game_sessions[cleaned_game_name][player_id]
     
     def get_answer(self, question: str, game_name: str, player_id: str) -> str:
-        """处理用户问题并返回回答"""
-        # 如果游戏没有RAG索引，尝试加载
-        if game_name not in self.game_retrievers:
-            vector_store_path = os.path.join(cfg.VECTOR_STORE_DIRECTORY, f"{game_name}")
-            if os.path.exists(vector_store_path):
-                try:
-                    vector_store = FAISS.load_local(vector_store_path, self.embeddings)
-                    self.game_retrievers[game_name] = vector_store.as_retriever(
-                        search_type="similarity",
-                        search_kwargs={"k": 5}
+        """获取LLM的回答"""
+        cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
+        
+        memory = self._get_or_create_memory(cleaned_game_name, player_id)
+        retriever = self.load_or_get_retriever(cleaned_game_name)
+
+        raw_answer = "" 
+
+        if retriever:
+            try:
+                # 准备 condense_question_prompt (如果自定义了)
+                condense_question_prompt_obj = None 
+                if cfg.CUSTOM_CONDENSE_QUESTION_PROMPT_TEMPLATE:
+                    condense_question_prompt_obj = PromptTemplate.from_template(
+                        cfg.CUSTOM_CONDENSE_QUESTION_PROMPT_TEMPLATE
                     )
-                except Exception as e:
-                    return f"无法加载游戏 '{game_name}' 的RAG索引: {str(e)}。请先使用 'tc rulebook refresh_cache' 构建规则索引。"
-            else:
-                return f"游戏 '{game_name}' 没有可用的RAG索引。请先使用 'tc rulebook refresh_cache' 构建规则索引。"
-        
-        # 获取玩家的对话记忆
-        memory = self._get_or_create_memory(game_name, player_id)
-        
-        try:
-            # 创建问答链
-            qa_chain = ConversationalRetrievalChain.from_llm(
-                llm=self.llm,
-                retriever=self.game_retrievers[game_name],
-                memory=memory,
-                verbose=cfg.DEBUG,
-                return_source_documents=False,
-            )
-            
-            # 处理问题
-            response = qa_chain({"question": question})
-            answer = response.get("answer", "无法生成回答")
-            
-            return answer
-        except Exception as e:
-            print(f"处理问题时出错: {str(e)}")
-            return f"处理问题时出错: {str(e)}"
+                    print("Using custom condense_question_prompt.")
+
+                # 准备 QA prompt (如果自定义了)
+                current_combine_docs_chain_kwargs = {} 
+                if cfg.CUSTOM_QA_PROMPT_TEMPLATE:
+                    qa_prompt = PromptTemplate.from_template(cfg.CUSTOM_QA_PROMPT_TEMPLATE)
+                    current_combine_docs_chain_kwargs["prompt"] = qa_prompt
+                    print("Using custom qa_prompt for combine_docs_chain.")
+
+                chain_args = {
+                    "llm": self.llm,
+                    "retriever": retriever,
+                    "memory": memory,
+                    "verbose": cfg.DEBUG,
+                    "return_source_documents": False,
+                }
+                if condense_question_prompt_obj: 
+                    chain_args["condense_question_prompt"] = condense_question_prompt_obj
+                
+                if current_combine_docs_chain_kwargs: 
+                    chain_args["combine_docs_chain_kwargs"] = current_combine_docs_chain_kwargs
+
+                qa_chain = ConversationalRetrievalChain.from_llm(**chain_args)
+                
+                response = qa_chain.invoke({"question": question})
+                raw_answer = response.get("answer", "无法生成回答")
+            except Exception as e:
+                print(f"处理问题时出错: {str(e)}")
+                raw_answer = f"抱歉，处理您的问题时发生了内部错误: {str(e)}"
+        else:
+            print(f"游戏 '{cleaned_game_name}' 没有可用的RAG检索器。")
+            raw_answer = "抱歉，当前游戏没有可用的规则书RAG索引，无法回答关于规则的问题。您可以尝试使用 `tc rulebook refresh_cache` 来加载规则书。"
+
+        # 清理回答中的 <think>...</think> 标签
+        if isinstance(raw_answer, str):
+            cleaned_answer = re.sub(r"<think>.*?</think>\n?", "", raw_answer, flags=re.DOTALL).strip()
+        else:
+            cleaned_answer = str(raw_answer).strip() if raw_answer is not None else ""
+
+        return cleaned_answer if cleaned_answer else "抱歉，我无法生成回答。"
     
     def reset_conversation(self, game_name: str, player_id: str):
-        """重置指定玩家的对话记忆"""
-        if game_name in self.game_sessions and player_id in self.game_sessions[game_name]:
-            self.game_sessions[game_name][player_id].clear()
-            print(f"已重置玩家 '{player_id}' 在 '{game_name}' 中的对话记忆")
+        """重置特定玩家的对话记忆"""
+        cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
+        if cleaned_game_name in self.game_sessions and player_id in self.game_sessions[cleaned_game_name]:
+            self.game_sessions[cleaned_game_name][player_id].clear()
+            print(f"已重置玩家 {player_id} 在游戏 '{cleaned_game_name}' 的对话记忆")
     
     def clear_game_state(self, game_name: str):
-        """清除游戏的所有状态（对话记忆和RAG索引）"""
-        # 清除对话记忆
-        if game_name in self.game_sessions:
-            del self.game_sessions[game_name]
+        """清除特定游戏的所有会话记忆和RAG索引"""
+        cleaned_game_name = game_name.strip() if isinstance(game_name, str) else game_name
+        if cleaned_game_name in self.game_sessions:
+            del self.game_sessions[cleaned_game_name]
+            print(f"已清除游戏 '{cleaned_game_name}' 的所有会话记忆")
         
-        # 清除RAG检索器
-        if game_name in self.game_retrievers:
-            del self.game_retrievers[game_name]
-        
-        print(f"已清除游戏 '{game_name}' 的所有状态") 
+        if cleaned_game_name in self.game_retrievers:
+            del self.game_retrievers[cleaned_game_name]
+            # 物理删除磁盘上的向量存储
+            vector_store_path = os.path.join(cfg.VECTOR_STORE_DIRECTORY, f"{cleaned_game_name}")
+            if os.path.exists(vector_store_path):
+                try:
+                    shutil.rmtree(vector_store_path) # 使用 shutil.rmtree 删除目录
+                    print(f"已删除磁盘上的向量存储: {vector_store_path}")
+                except Exception as e:
+                    print(f"删除向量存储 {vector_store_path} 失败: {e}")
+            print(f"已清除游戏 '{cleaned_game_name}' 的RAG索引") 

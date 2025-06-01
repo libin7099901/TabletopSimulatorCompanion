@@ -71,4 +71,12 @@ HTTP_PROXY = os.getenv('HTTP_PROXY', '')
 HTTPS_PROXY = os.getenv('HTTPS_PROXY', '')
 
 # 调试模式
-DEBUG = os.getenv('DEBUG', 'False').lower() == 'true' 
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
+
+# 自定义提示词模板 (可选)
+# 如果未设置，将使用Langchain的默认提示词
+# {chat_history} 和 {question} 是 condense_question_prompt 的可用变量
+CUSTOM_CONDENSE_QUESTION_PROMPT_TEMPLATE = os.getenv('CUSTOM_CONDENSE_QUESTION_PROMPT_TEMPLATE', None)
+
+# {context} 和 {question} 是 qa_prompt (combine_docs_chain) 的可用变量
+CUSTOM_QA_PROMPT_TEMPLATE = os.getenv('CUSTOM_QA_PROMPT_TEMPLATE', None) 
